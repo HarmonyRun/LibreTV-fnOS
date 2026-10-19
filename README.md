@@ -273,6 +273,7 @@ MCP 搜索资源、加入影视库、删除 STRM、触发同步与媒体库扫�
 - 鉴权：`Authorization: Bearer <MCP_TOKEN>`
 - Token 获取：LibreTV → 设置 → 媒体库 → STRM 媒体库 → 底部「MCP 服务」查看/复制/重置
 - 仅支持 stdio 的客户端：使用 `mcp/stdio-bridge.js` 桥接
+- 删除：`remove_from_library` 默认递归删除整个资源目录，传 `season` 只删该季文件夹（其余季保留）；
 - 工具：`search_videos`、`add_to_library`、`list_library`、`remove_from_library`、
   `sync_library`、`cleanup_orphans`、`get_engine_status`、`refresh_media_library` 等
 
