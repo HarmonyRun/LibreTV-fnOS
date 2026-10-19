@@ -89,7 +89,7 @@ node mcp/stdio-bridge.js --url http://<NAS-IP>:8092/mcp --token <MCP_TOKEN>
 | `get_video_detail` | 查看详情/线路/剧集（只读） | `sourceApiBase`、`vodId` |
 | `add_to_library` | 加入影视库并生成 STRM | `sourceApiBase`、`vodId`、`type?`、`wait?` |
 | `list_library` | 列出已入库条目 | `query?`、`type?`、`limit?` |
-| `remove_from_library` | 删除条目 + STRM + 索引 + 刷新影视库 | `key` 或 `title`、`all?`、`refreshMedia?` |
+| `remove_from_library` | **递归删除资源目录**（或按季删除），同步清理索引 + 刷新影视库 | `key`/`title`、`season?`、`all?`、`dryRun?` |
 | `sync_library` | 触发增量同步 | `wait?`、`timeoutSeconds?` |
 | `cleanup_orphans` | 清理孤儿 STRM | `wait?` |
 | `get_engine_status` | 引擎/索引/同步状态 | — |
@@ -107,13 +107,20 @@ node mcp/stdio-bridge.js --url http://<NAS-IP>:8092/mcp --token <MCP_TOKEN>
 
 > 用户：把《庆余年》从影视库删掉。
 >
-> 模型：`list_library` 确认条目 → `remove_from_library`（title=庆余年，all=true 如需多源）→
-> 返回删除的文件与媒体库刷新结果。
+> 模型：`list_library` 确认条目 → `remove_from_library`（title=庆余年）→
+> 递归删除 `strmdata/庆余年 (2019)` 整个目录并刷新媒体库。
+>
+> 用户：只删《庆余年》第一季，第二季保留。
+>
+> 模型：`remove_from_library`（title=庆余年，season=1）→ 只删除 `Season 01` 整个目录，
+> `Season 02` 与索引中的第二季条目保留。
 
 ## 6. 安全说明
 
 - 所有 MCP 请求必须携带 Bearer Token；Token 仅在登录 LibreTV 后可查看/重置；
-- `remove_from_library` 只允许删除 **STRM 根目录内**、且被索引引用的 `.strm` 文件，
-  不会递归删除用户其它文件；`all=false` 时匹配多条会要求确认；
+- `remove_from_library` 删除的是 **STRM 根目录内的资源目录**（如 `strmdata/庆余年 (2019)`）：
+  默认递归删除整个目录；传 `season` 时只删除该季目录（如 `Season 01`）。
+  删除前会校验目标在 STRM 根目录内且不是根目录本身；`all=false` 时匹配到多个资源目录会要求确认，
+  可先用 `dryRun=true` 预览将删除的目录与文件数；
 - 令牌泄露时立即在设置页「重新生成」；
 - MCP 服务默认启用；不需要可在设置页关闭。
