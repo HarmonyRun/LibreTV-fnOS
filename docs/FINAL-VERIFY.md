@@ -138,3 +138,20 @@
   - 播放器使用 hls.js（XHR）直接取流，源站响应 `access-control-allow-origin: *`，浏览器可跨域播放；
 - 使用建议：局域网/公网直连继续用 8090 + 「影视库」8091；中继/远程观看使用**飞牛影视原生页面/App**，不要用 8091 入口。
 - 已知风险：个别源站 CDN 对部分客户端网络不可达（全球节点抽样存在 200/404 差异），远程播放失败时换源重试。
+
+## 10. MCP 服务验证（1.0.3）
+
+- 服务随 start.js 启动（独立端口 8092，与 Web/引擎同进程），并在 `8090/api/mcp` 提供同源代理入口；
+- Token 自动生成并保存在 `var/config.json` 的 `mcp.token`，LibreTV 设置页可查看/复制/重新生成/启停；
+- 实测（1.0.3，NAS）：
+  - `initialize` / `tools/list`（11 个工具）/ `resources/list` 正常；
+  - `search_videos` 搜索《流浪地球》返回多源结果；
+  - `add_to_library` 生成 `流浪地球 (2019)/流浪地球 (2019).strm`，索引 +1；
+  - `list_library` / `get_strm_content` 正确返回条目与源 URL；
+  - `remove_from_library` 删除 STRM、清理空目录、移除索引，文件与索引均清除；
+  - `8090/api/mcp` 与 `8092/mcp` 两个入口均可用；
+  - 设置页关闭 MCP 后请求立即 403，重新启用后恢复；
+  - 应用重启后 8090/8091/8092 与 MCP token 均保持；
+  - stdio 桥接 `mcp/stdio-bridge.js` 实测可完成 initialize/tools/list。
+- 安全：Bearer Token 鉴权；删除仅限 STRM 根目录内且被索引引用的文件；Token 可随时重置。
+- 限制：FN Connect 中继只暴露 fnOS 主网关，8090/8092 在中继下不可达，MCP 请在局域网/公网直连环境使用。

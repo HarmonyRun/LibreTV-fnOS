@@ -94,6 +94,34 @@ try {
   log('error', `影视代理启动失败（主 Web 继续运行）: ${err && err.stack ? err.stack : err}`);
 }
 
+// ---- 启动 MCP 服务（大模型通过 MCP 管理媒体库） ------------------------------
+let mcpHandle = null;
+try {
+  const cfg = (() => {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8'));
+    } catch {
+      return {};
+    }
+  })();
+  const mcpCfg = cfg && cfg.mcp && typeof cfg.mcp === 'object' ? cfg.mcp : {};
+  const enabled = mcpCfg.enabled !== false;
+  const mcpPort = Number(mcpCfg.port) > 0 ? Number(mcpCfg.port) : 8092;
+  if (enabled) {
+    const { createMcpServer } = require(path.join(__dirname, 'mcp', 'index.js'));
+    mcpHandle = createMcpServer({
+      dataDir,
+      logger: { log, info: (m) => log('info', m), warn: (m) => log('warn', m), error: (m) => log('error', m) },
+      port: mcpPort,
+    });
+    mcpHandle.start().catch((err) => log('error', `MCP 启动失败: ${err && err.message}`));
+  } else {
+    log('info', 'MCP 服务已禁用（config.mcp.enabled=false）');
+  }
+} catch (err) {
+  log('error', `MCP 启动失败（主 Web 继续运行）: ${err && err.stack ? err.stack : err}`);
+}
+
 // ---- 优雅退出 ----------------------------------------------------------------
 let stopping = false;
 function shutdown(signal) {
@@ -103,6 +131,7 @@ function shutdown(signal) {
   try {
     if (engineHandle && typeof engineHandle.stop === 'function') engineHandle.stop();
     if (mediaProxyHandle && typeof mediaProxyHandle.stop === 'function') mediaProxyHandle.stop();
+    if (mcpHandle && typeof mcpHandle.stop === 'function') mcpHandle.stop();
   } catch (err) {
     log('error', `停止引擎失败: ${err && err.message}`);
   }

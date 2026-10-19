@@ -1,7 +1,7 @@
 # LibreTV 飞牛 OS 原生应用（内置 STRM 自动化引擎）
 
 > **项目仓库**：<https://github.com/HarmonyRun/LibreTV-fnOS>  
-> **安装包下载**：<https://github.com/HarmonyRun/LibreTV-fnOS/releases>（Release 附件 `libretv-1.0.2.fpk`）  
+> **安装包下载**：<https://github.com/HarmonyRun/LibreTV-fnOS/releases>（Release 附件 `libretv-1.0.3.fpk`）  
 > 本项目基于开源项目 [LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV)（AGPL-3.0）二次开发，
 > 上游 fork：<https://github.com/HarmonyRun/LibreTV>。
 
@@ -25,7 +25,7 @@ FPK 应用，并在**同一进程**内内置「全自动 STRM 引擎」：
 
 ### 第 1 步：安装应用（并授权目录）
 
-1. 从 [Releases](https://github.com/HarmonyRun/LibreTV-fnOS/releases) 下载 `libretv-1.0.2.fpk`，打开 **应用中心 → 手动安装** 选择该文件；
+1. 从 [Releases](https://github.com/HarmonyRun/LibreTV-fnOS/releases) 下载 `libretv-1.0.3.fpk`，打开 **应用中心 → 手动安装** 选择该文件；
 2. 安装位置选择 **/vol2**（与 STRM 目录同一存储空间）；
 3. 安装向导填写：
    - **STRM 文件根目录**：默认 `/vol2/1000/liberTV/strmdata`（建议保留）。
@@ -108,7 +108,7 @@ STRM 生成后，引擎会调用飞牛影视 API 对**发生变化的目录**做
 
 | 项目 | 结果 |
 |---|---|
-| `fnpack build` | ✅ 零错误，`dist/libretv-1.0.2.fpk` |
+| `fnpack build` | ✅ 零错误，`dist/libretv-1.0.3.fpk` |
 | 安装到 /vol2、启动、`/api/auth` 200 | ✅ |
 | 引擎单测 / Web 单测 / lint / tsc | ✅ 81 / 440 / 0 / 0 |
 | 电影「加入媒体库」→ STRM 落盘 | ✅《沙丘 (2020)》 |
@@ -181,7 +181,7 @@ cat > /tmp/libretv-install.env <<'EOF'
 wizard_strm_root=/vol2/1000/liberTV/strmdata
 wizard_password=libretv
 EOF
-scp dist/libretv-1.0.2.fpk /tmp/libretv-install.env <nas>:/tmp/libretv-deploy/
+scp dist/libretv-1.0.3.fpk /tmp/libretv-install.env <nas>:/tmp/libretv-deploy/
 ssh <nas> 'sudo -n appcenter-cli install-fpk /tmp/libretv-deploy/libretv-1.0.1.fpk -v 2 -e /tmp/libretv-deploy/libretv-install.env'
 ssh <nas> 'sudo -n appcenter-cli start libretv'
 curl http://<nas>:8090/api/auth
@@ -264,7 +264,22 @@ MediaWarp/fntv-proxy 这类代理；本应用把该能力内置，避免额外�
 > **Clash 用户注意**：如果使用代理，采集站 CDN 很可能对代理出口返回 403/404，导致「STRM 直连播放异常」。
 > 请按 [docs/CLASH-RULES.md](docs/CLASH-RULES.md) 把 CDN 域名加入 DIRECT（规则文件：[clash/rules-snippet.yaml](clash/rules-snippet.yaml)）。
 
-## 十一、许可证与致谢
+## 十一、MCP 服务（大模型管理，1.0.3 新增）
+
+应用内置 MCP（Model Context Protocol）服务，DeepSeek Harness、WorkBuddy 等 AI 客户端可通过
+MCP 搜索资源、加入影视库、删除 STRM、触发同步与媒体库扫描。
+
+- 连接地址：`http://<NAS-IP>:8092/mcp`（独立端口）或 `http://<NAS-IP>:8090/api/mcp`（同源代理）
+- 鉴权：`Authorization: Bearer <MCP_TOKEN>`
+- Token 获取：LibreTV → 设置 → 媒体库 → STRM 媒体库 → 底部「MCP 服务」查看/复制/重置
+- 仅支持 stdio 的客户端：使用 `mcp/stdio-bridge.js` 桥接
+- 工具：`search_videos`、`add_to_library`、`list_library`、`remove_from_library`、
+  `sync_library`、`cleanup_orphans`、`get_engine_status`、`refresh_media_library` 等
+
+详见 [docs/MCP.md](docs/MCP.md)。MCP 服务异常不影响 LibreTV 主 Web；FN Connect 中继下
+8090/8092 不可达，MCP 请在局域网或公网直连环境使用。
+
+## 十二、许可证与致谢
 
 - 本项目以 **AGPL-3.0-or-later** 发布（与上游 LibreTV 一致），见 [LICENSE](LICENSE)。
 - 上游项目：[LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV)；本项目是面向飞牛 OS 的

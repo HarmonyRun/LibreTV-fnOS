@@ -19,6 +19,7 @@ import { useToast } from './toast';
 import { Icon } from './icon';
 import { SectionTitle, ToggleRow } from './settings-shared';
 import { ErrorState, Spinner } from './states';
+import { McpPanel } from './mcp-panel';
 
 /**
  * 设置抽屉 →「媒体库 → STRM 媒体库」面板：
@@ -453,6 +454,7 @@ export function StrmMediaPanel() {
           </div>
         </div>
       )}
+      <McpPanel />
     </section>
   );
 }

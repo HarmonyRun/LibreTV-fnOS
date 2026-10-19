@@ -201,8 +201,8 @@ const cfg = {
     appName: "trimemedia-web",
     username: "",
     password: "",
-    secretString: "NDzZTVxnRKP8Z0jXg1VAMonaG8akvh",
-    apiKey: "16CCEB3D-AB42-077D-36A1-F355324E4237",
+    secretString: "<MEDIA_SECRET>",
+    apiKey: "<MEDIA_API_KEY>",
     libraryName: ""
   },
   sources: [

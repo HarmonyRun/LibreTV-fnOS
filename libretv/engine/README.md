@@ -272,8 +272,8 @@ authx     = "nonce=<nonce>&timestamp=<timestamp>&sign=<sign>"
    - api_key：匹配 `api_key` / `apiKey` 赋值；或扫描前端字节数组并按 **XOR 169** 解码，
      取解码后为 UUID 的常量（影视前端 `vh` 的实现）；
 3. **内置默认常量**（随影视 0.9.8-1 实测固定，用户 config 可覆盖）：
-   - secret：`<MEDIA_SECRET>`
-   - apiKey：`<MEDIA_API_KEY>`
+   - secret：`NDzZTVxnRKP8Z0jXg1VAMonaG8akvh`
+   - apiKey：`16CCEB3D-AB42-077D-36A1-F355324E4237`
 
 解析结果按配置签名缓存（进程内只读一次 bundle），只把来源写 `state.fnv.secretSource`，
 **日志绝不输出密钥原文**。bundle 不存在时静默回退内置常量；缺媒体账号密码/未启用 →

@@ -136,6 +136,14 @@ cp "$LIBRETV_DIR/start.js" "$APP_SERVER/start.js"
 cp "$LIBRETV_DIR/package.json" "$APP_SERVER/package.json"
 
 if [ -f "$LIBRETV_DIR/engine/index.js" ]; then
+    info "复制 MCP 服务 mcp/"
+    if [ -d "$LIBRETV_DIR/mcp" ]; then
+        rm -rf "$APP_SERVER/mcp"
+        cp -R "$LIBRETV_DIR/mcp" "$APP_SERVER/mcp"
+    else
+        warn "缺少 libretv/mcp：MCP 功能不可用"
+    fi
+
     info "复制影视兼容代理 mediaserver/"
     if [ -d "$LIBRETV_DIR/mediaserver" ]; then
         rm -rf "$APP_SERVER/mediaserver"

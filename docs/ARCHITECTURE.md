@@ -285,3 +285,14 @@ engine 处理完成后：
 - 安全：中转 token 用 `config.password` 派生密钥 HMAC 签名；不记录密钥原文。
 - 边界：影视 0.9.8 原生不支持 HLS STRM 直连，代理以 NAS 中转换取可用性；TV App 自定义
   服务器地址能力待确认，Web/手机浏览器可直接用 `http://<NAS-IP>:8091/`。
+
+## 14. MCP 服务（1.0.3）
+
+- 代码：`libretv/mcp/index.js`（MCP Streamable HTTP，默认 8092，随 start.js 同进程启动），
+  `libretv/mcp/stdio-bridge.js`（stdio 客户端桥接），Next 同源代理 `src/app/api/mcp/route.ts`；
+- 鉴权：`config.mcp.token`（自动生成）→ `Authorization: Bearer <token>`；设置页可查看/重置/启停；
+- 工具：search_videos / get_video_detail / add_to_library / list_library / remove_from_library /
+  sync_library / cleanup_orphans / get_engine_status / refresh_media_library / list_sources / get_strm_content；
+  资源：libretv://library / libretv://status / libretv://sources；
+- 写操作复用 `queue/` 与 `strm-index.json` 契约，删除操作限制在 STRM 根目录内且仅限索引引用文件；
+- 中继（FN Connect）只暴露主网关，8090/8092 不可达；MCP 用于局域网/公网直连场景。
