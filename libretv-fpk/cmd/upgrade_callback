@@ -1,0 +1,136 @@
+#!/bin/bash
+# 升级后回调（root）：补齐新增配置字段、确保 STRM 目录存在；保留 var/index（幂等）
+set -u
+
+APP_NAME="libretv"
+APP_USER="libretv"
+APP_GROUP="libretv"
+: "${TRIM_APPDEST:=/var/apps/${APP_NAME}/target}"
+: "${TRIM_PKGVAR:=/var/apps/${APP_NAME}/var}"
+
+NODE_BIN="${TRIM_APPDEST}/node/bin/node"
+CONFIG_FILE="${TRIM_PKGVAR}/config.json"
+
+log() { echo "[libretv-upgrade] $*"; }
+
+mkdir -p "${TRIM_PKGVAR}/queue/processing" "${TRIM_PKGVAR}/queue/failed" "${TRIM_PKGVAR}/logs" 2>/dev/null || true
+
+# ---- 补齐缺失字段（不覆盖已有值） ------------------------------------------
+if [ -f "${CONFIG_FILE}" ] && [ -x "${NODE_BIN}" ]; then
+    "${NODE_BIN}" -e '
+const fs = require("fs");
+const file = process.argv[1];
+let cfg;
+try {
+  cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch (e) {
+  console.error("config.json 解析失败: " + e.message);
+  process.exit(0);
+}
+if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) cfg = {};
+const changed = [];
+function fill(obj, key, value, path) {
+  if (obj[key] === undefined || obj[key] === null) {
+    obj[key] = value;
+    changed.push(path);
+  }
+}
+fill(cfg, "port", 8090, "port");
+fill(cfg, "password", "libretv", "password");
+fill(cfg, "strmRoot", "", "strmRoot");
+fill(cfg, "syncIntervalHours", 6, "syncIntervalHours");
+fill(cfg, "movieLibraryName", "LibreTV 电影", "movieLibraryName");
+fill(cfg, "tvLibraryName", "LibreTV 剧集", "tvLibraryName");
+if (!Array.isArray(cfg.sources)) {
+  cfg.sources = [
+    { key: "env_0", name: "电影天堂资源", url: "https://caiji.dyttzyapi.com/api.php/provide/vod" },
+    { key: "env_1", name: "量子资源", url: "https://cj.lziapi.com/api.php/provide/vod" },
+    { key: "env_2", name: "如意资源", url: "https://cj.rycjapi.com/api.php/provide/vod" },
+    { key: "env_3", name: "优质资源", url: "https://api.yzzy-api.com/inc/apijson.php" }
+  ];
+  changed.push("sources");
+}
+if (!cfg.fnv || typeof cfg.fnv !== "object") {
+  cfg.fnv = {
+    enabled: true,
+    baseUrl: "http://127.0.0.1:5666",
+    appName: "trimemedia-web",
+    username: "",
+    password: "",
+    secretString: "NDzZTVxnRKP8Z0jXg1VAMonaG8akvh",
+    apiKey: "16CCEB3D-AB42-077D-36A1-F355324E4237",
+    libraryName: ""
+  };
+  changed.push("fnv");
+} else {
+  fill(cfg.fnv, "enabled", false, "fnv.enabled");
+  fill(cfg.fnv, "baseUrl", "http://127.0.0.1:5666", "fnv.baseUrl");
+  fill(cfg.fnv, "appName", "trimemedia-web", "fnv.appName");
+  fill(cfg.fnv, "username", "", "fnv.username");
+  fill(cfg.fnv, "password", "", "fnv.password");
+  fill(cfg.fnv, "secretString", "NDzZTVxnRKP8Z0jXg1VAMonaG8akvh", "fnv.secretString");
+  fill(cfg.fnv, "apiKey", "16CCEB3D-AB42-077D-36A1-F355324E4237", "fnv.apiKey");
+  fill(cfg.fnv, "libraryName", "", "fnv.libraryName");
+}
+if (changed.length) {
+  const tmp = file + ".tmp." + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o640 });
+  fs.renameSync(tmp, file);
+  console.log("补齐字段: " + changed.join(", "));
+} else {
+  console.log("配置字段完整，无需迁移");
+}
+' "${CONFIG_FILE}" 2>&1 | while IFS= read -r line; do log "${line}"; done
+fi
+
+# ---- 确保索引/状态骨架存在（不覆盖已有） ------------------------------------
+[ -f "${TRIM_PKGVAR}/strm-index.json" ] || printf '%s\n' '{"version":1,"updatedAt":"","entries":{}}' > "${TRIM_PKGVAR}/strm-index.json"
+[ -f "${TRIM_PKGVAR}/state.json" ] || printf '%s\n' '{"engine":{},"fnv":{},"paths":{}}' > "${TRIM_PKGVAR}/state.json"
+
+# ---- 确保 STRM 目录存在 ------------------------------------------------------
+STRM_ROOT=""
+if [ -f "${CONFIG_FILE}" ] && [ -x "${NODE_BIN}" ]; then
+    STRM_ROOT="$("${NODE_BIN}" -e '
+const fs = require("fs");
+try {
+  const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  process.stdout.write(typeof cfg.strmRoot === "string" ? cfg.strmRoot : "");
+} catch (e) {}
+' "${CONFIG_FILE}" 2>/dev/null)"
+fi
+
+if [ -n "${STRM_ROOT}" ]; then
+    case "${STRM_ROOT}" in
+    /vol*/@app* | /var/apps* | /usr* | /etc* | /proc* | /sys*)
+        log "警告: 现有 strmRoot 位于内部目录，跳过自动创建: ${STRM_ROOT}"
+        ;;
+    *)
+        if [ ! -d "${STRM_ROOT}" ]; then
+            if mkdir -p "${STRM_ROOT}" 2>/dev/null; then
+                log "已重建缺失的 STRM 目录: ${STRM_ROOT}"
+            else
+                log "警告: STRM 目录不存在且无法创建: ${STRM_ROOT}"
+            fi
+        fi
+        if [ -d "${STRM_ROOT}" ] && id "${APP_USER}" >/dev/null 2>&1; then
+            chown "${APP_USER}:${APP_GROUP}" "${STRM_ROOT}" 2>/dev/null || true
+            chmod 2775 "${STRM_ROOT}" 2>/dev/null || true
+            # 升级后补 trimacl 授权（btrfs trimacl 卷 POSIX ACL 无效）
+            TRIMACL_BIN="/usr/trim/bin/trimacl"
+            APP_UID="$(id -u "${APP_USER}" 2>/dev/null || true)"
+            if [ -n "${APP_UID}" ] && [ -x "${TRIMACL_BIN}" ]; then
+                "${TRIMACL_BIN}" -m "a:u:${APP_UID}:rwxpDaAeEc:sfd" "${STRM_ROOT}" 2>>"${TRIM_PKGVAR}/trimacl.log" \
+                    && log "trimacl 授权成功: ${STRM_ROOT}" || log "警告: trimacl 授权失败: ${STRM_ROOT}"
+            fi
+        fi
+        ;;
+    esac
+fi
+
+# ---- 属主 ---------------------------------------------------------------
+if id "${APP_USER}" >/dev/null 2>&1; then
+    chown -R "${APP_USER}:${APP_GROUP}" "${TRIM_PKGVAR}" 2>/dev/null || log "警告: chown 数据目录失败"
+fi
+
+log "升级完成（var/config/index 已保留）"
+exit 0

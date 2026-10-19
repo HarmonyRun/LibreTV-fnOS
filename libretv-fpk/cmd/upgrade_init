@@ -1,0 +1,30 @@
+#!/bin/bash
+# 升级前回调（root）：备份 config.json，准备目录骨架；绝不删除 var/index
+set -u
+
+APP_NAME="libretv"
+APP_USER="libretv"
+APP_GROUP="libretv"
+: "${TRIM_APPDEST:=/var/apps/${APP_NAME}/target}"
+: "${TRIM_PKGVAR:=/var/apps/${APP_NAME}/var}"
+
+log() { echo "[libretv-upgrade_init] $*"; }
+
+mkdir -p "${TRIM_PKGVAR}/queue/processing" "${TRIM_PKGVAR}/queue/failed" "${TRIM_PKGVAR}/logs" 2>/dev/null || true
+
+CONFIG_FILE="${TRIM_PKGVAR}/config.json"
+if [ -f "${CONFIG_FILE}" ]; then
+    BACKUP="${CONFIG_FILE}.bak.$(date '+%Y%m%d%H%M%S')"
+    if cp -a "${CONFIG_FILE}" "${BACKUP}" 2>/dev/null; then
+        log "已备份配置: ${BACKUP}"
+    else
+        log "警告: 备份配置失败，继续升级"
+    fi
+    # 只保留最近 3 个备份
+    ls -1t "${CONFIG_FILE}".bak.* 2>/dev/null | tail -n +4 | while IFS= read -r old; do
+        rm -f -- "${old}" 2>/dev/null || true
+    done
+fi
+
+log "升级前检查完成（var/index 保留）"
+exit 0

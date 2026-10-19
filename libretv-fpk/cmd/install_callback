@@ -1,0 +1,239 @@
+#!/bin/bash
+# 安装后回调（实测：fnOS 以应用用户 libretv 执行，非 root）：
+#   1) 创建 var 目录骨架 / config.json / state / index（var 归应用用户，可写）
+#   2) 尝试创建 STRM 根目录；无权限时写 perm-needed 并提示「授权目录」，不阻断安装
+#   3) root 时执行 chown/chmod + trimacl；非 root 时跳过（权限由「应用设置→授权目录」授予）
+#   4) 任何权限问题都不以非 0 退出，避免 APP_INSTALL_FAILED_INSTALL_CALLBACK_EXCEPTION
+set -u
+
+APP_NAME="libretv"
+APP_USER="libretv"
+APP_GROUP="libretv"
+: "${TRIM_APPDEST:=/vol2/@appcenter/${APP_NAME}}"
+: "${TRIM_PKGVAR:=/vol2/@appdata/${APP_NAME}}"
+
+NODE_BIN="${TRIM_APPDEST}/node/bin/node"
+DEFAULT_STRM_ROOT="/vol2/1000/liberTV/strmdata"
+DEFAULT_PASSWORD="libretv"
+TRIMACL_BIN="/usr/trim/bin/trimacl"
+
+RUN_UID="$(id -u 2>/dev/null || echo unknown)"
+APP_UID="$(id -u "${APP_USER}" 2>/dev/null || true)"
+
+log() { echo "[libretv-install] $*"; }
+is_root() { [ "${RUN_UID}" = "0" ]; }
+
+# 诊断：记录回调运行身份与环境
+{
+    printf '%s uid=%s user=%s TRIM_APPDEST=%s TRIM_PKGVAR=%s TRIM_APPDEST_VOL=%s\n' \
+        "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${RUN_UID}" "$(id -un 2>/dev/null)" \
+        "${TRIM_APPDEST:-}" "${TRIM_PKGVAR:-}" "${TRIM_APPDEST_VOL:-}"
+} >>/tmp/libretv_install_callback.log 2>/dev/null || true
+
+log "运行身份: uid=${RUN_UID} user=$(id -un 2>/dev/null) app_uid=${APP_UID:-none}"
+
+# ---- 权限工具函数（root 才真正有权限） --------------------------------------
+trimacl_allow() {
+    local dir="$1"
+    if ! is_root; then
+        log "非 root：跳过 trimacl 授权（由「应用设置 → 授权目录」完成）"
+        return 1
+    fi
+    if [ -n "${APP_UID}" ] && [ -x "${TRIMACL_BIN}" ]; then
+        if "${TRIMACL_BIN}" -m "a:u:${APP_UID}:rwxpDaAeEc:sfd" "${dir}" 2>>"${TRIM_PKGVAR}/trimacl.log"; then
+            log "trimacl 授权成功: ${dir} (uid ${APP_UID})"
+            return 0
+        fi
+        log "警告: trimacl 授权失败: ${dir}"
+        return 1
+    fi
+    [ -x "${TRIMACL_BIN}" ] || log "提示: 未找到 ${TRIMACL_BIN}，降级使用 chown/chmod"
+    return 1
+}
+
+trimacl_ancestors() {
+    local dir="$1" p depth
+    is_root || return 0
+    p="$(dirname "${dir}")"
+    depth=0
+    while [ -n "${p}" ] && [ "${p}" != "/" ] && [ "${depth}" -lt 6 ]; do
+        case "${p}" in
+        /vol[0-9]*)
+            if [ -n "${APP_UID}" ] && [ -x "${TRIMACL_BIN}" ]; then
+                "${TRIMACL_BIN}" -m "a:u:${APP_UID}:x:s" "${p}" 2>/dev/null && log "祖先遍历 ACE: ${p}" || true
+            fi
+            ;;
+        esac
+        p="$(dirname "${p}")"
+        depth=$((depth + 1))
+    done
+}
+
+verify_app_write() {
+    local dir="$1" escaped
+    [ -d "${dir}" ] || return 1
+    # 当前进程就是应用用户时直接测；否则用 su 切换
+    if [ "${RUN_UID}" = "${APP_UID}" ]; then
+        (touch "${dir}/.write-test" 2>/dev/null && rm -f "${dir}/.write-test" 2>/dev/null)
+        return $?
+    fi
+    [ -n "${APP_UID}" ] || return 1
+    escaped="$(printf '%s' "${dir}" | sed "s/'/'\\\\''/g")"
+    su -s /bin/sh "${APP_USER}" -c "touch '${escaped}/.write-test' && rm -f '${escaped}/.write-test'" >/dev/null 2>&1
+}
+
+mark_perm_ok() {
+    rm -f "${TRIM_PKGVAR}/perm-needed" 2>/dev/null || true
+    printf 'ok %s %s uid=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$1" "${APP_UID:-none}" >"${TRIM_PKGVAR}/perm-ok" 2>/dev/null || true
+}
+
+mark_perm_needed() {
+    rm -f "${TRIM_PKGVAR}/perm-ok" 2>/dev/null || true
+    printf '%s\n' "$1" >"${TRIM_PKGVAR}/perm-needed" 2>/dev/null || true
+}
+
+ensure_strm_access() {
+    local dir="$1"
+    if is_root && id "${APP_USER}" >/dev/null 2>&1; then
+        chown "${APP_USER}:${APP_GROUP}" "${dir}" 2>/dev/null || true
+        chmod 2775 "${dir}" 2>/dev/null || true
+    fi
+    trimacl_allow "${dir}" >/dev/null 2>&1 || true
+
+    if verify_app_write "${dir}"; then
+        log "应用用户写入测试通过: ${dir}"
+        mark_perm_ok "${dir}"
+        return 0
+    fi
+
+    trimacl_ancestors "${dir}"
+    trimacl_allow "${dir}" >/dev/null 2>&1 || true
+    if verify_app_write "${dir}"; then
+        log "祖先授权后写入测试通过: ${dir}"
+        mark_perm_ok "${dir}"
+        return 0
+    fi
+
+    log "警告: 应用用户 ${APP_USER} 当前无法写入 ${dir}"
+    log "请到「应用设置 → 授权目录」添加该目录（飞牛会为应用用户补 trimacl ACE）"
+    mark_perm_needed "${dir}"
+    return 1
+}
+
+# ---- 参数校验 ---------------------------------------------------------------
+STRM_ROOT="${wizard_strm_root:-${DEFAULT_STRM_ROOT}}"
+PASSWORD="${wizard_password:-${DEFAULT_PASSWORD}}"
+
+case "${STRM_ROOT}" in
+/*) ;;
+*)
+    log "警告: STRM 根目录不是绝对路径（${STRM_ROOT}），回退默认 ${DEFAULT_STRM_ROOT}"
+    STRM_ROOT="${DEFAULT_STRM_ROOT}"
+    ;;
+esac
+
+case "${STRM_ROOT}" in
+/vol*/@app* | /var/apps* | /usr* | /etc* | /proc* | /sys*)
+    log "错误: STRM 根目录不能位于应用/系统内部目录: ${STRM_ROOT}"
+    STRM_ROOT="${DEFAULT_STRM_ROOT}"
+    ;;
+esac
+
+[ -n "${PASSWORD}" ] || PASSWORD="${DEFAULT_PASSWORD}"
+
+# ---- 数据目录骨架（应用用户可写） ------------------------------------------
+if ! mkdir -p "${TRIM_PKGVAR}/queue/processing" "${TRIM_PKGVAR}/queue/failed" "${TRIM_PKGVAR}/logs" 2>/dev/null; then
+    log "警告: 无法创建数据目录 ${TRIM_PKGVAR}（稍后由 main 首次启动时重试）"
+fi
+touch "${TRIM_PKGVAR}/app.log" 2>/dev/null || true
+
+# ---- STRM 根目录与授权（不阻断安装） ---------------------------------------
+log "STRM 根目录: ${STRM_ROOT}"
+if mkdir -p "${STRM_ROOT}" 2>/dev/null; then
+    log "STRM 根目录已存在/已创建: ${STRM_ROOT}"
+    ensure_strm_access "${STRM_ROOT}" || true
+elif [ -d "${STRM_ROOT}" ]; then
+    log "STRM 根目录已存在: ${STRM_ROOT}"
+    ensure_strm_access "${STRM_ROOT}" || true
+else
+    log "警告: 无权限创建 STRM 根目录: ${STRM_ROOT}（install_callback 以应用用户运行）"
+    log "请到「应用设置 → 授权目录」添加该目录；安装继续"
+    mark_perm_needed "${STRM_ROOT}"
+fi
+
+# ---- 持久化向导值 install-vars.json（供 main 自举使用；失败退 /tmp） ---------
+install_vars_write() {
+    local target="$1"
+    [ -x "${NODE_BIN}" ] || return 1
+    "${NODE_BIN}" -e '
+const fs = require("fs");
+const [file, strmRoot, password] = process.argv.slice(1);
+fs.writeFileSync(file, JSON.stringify({ strmRoot, password }, null, 2) + "\n", { mode: 0o600 });
+' "${target}" "${STRM_ROOT}" "${PASSWORD}" 2>/dev/null
+}
+if install_vars_write "${TRIM_PKGVAR}/install-vars.json"; then
+    log "已持久化向导值: ${TRIM_PKGVAR}/install-vars.json"
+elif install_vars_write "/tmp/libretv-install-vars.json"; then
+    log "已持久化向导值到临时文件: /tmp/libretv-install-vars.json"
+else
+    log "警告: 向导值持久化失败（main 将使用默认值）"
+fi
+
+# ---- config.json（不存在才创建，绝不覆盖；失败也不阻断安装） ---------------
+CONFIG_FILE="${TRIM_PKGVAR}/config.json"
+if [ -f "${CONFIG_FILE}" ]; then
+    log "config.json 已存在，保留不覆盖: ${CONFIG_FILE}"
+elif [ -x "${NODE_BIN}" ]; then
+    log "创建默认 config.json: ${CONFIG_FILE}"
+    if "${NODE_BIN}" -e '
+const fs = require("fs");
+const [file, strmRoot, password] = process.argv.slice(1);
+const cfg = {
+  port: 8090,
+  password: password || "libretv",
+  strmRoot,
+  syncIntervalHours: 6,
+  movieLibraryName: "LibreTV 电影",
+  tvLibraryName: "LibreTV 剧集",
+  fnv: {
+    enabled: true,
+    baseUrl: "http://127.0.0.1:5666",
+    appName: "trimemedia-web",
+    username: "",
+    password: "",
+    secretString: "NDzZTVxnRKP8Z0jXg1VAMonaG8akvh",
+    apiKey: "16CCEB3D-AB42-077D-36A1-F355324E4237",
+    libraryName: ""
+  },
+  sources: [
+    { key: "env_0", name: "电影天堂资源", url: "https://caiji.dyttzyapi.com/api.php/provide/vod" },
+    { key: "env_1", name: "量子资源", url: "https://cj.lziapi.com/api.php/provide/vod" },
+    { key: "env_2", name: "如意资源", url: "https://cj.rycjapi.com/api.php/provide/vod" },
+    { key: "env_3", name: "优质资源", url: "https://api.yzzy-api.com/inc/apijson.php" }
+  ]
+};
+fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o640 });
+' "${CONFIG_FILE}" "${STRM_ROOT}" "${PASSWORD}" 2>>"${TRIM_PKGVAR}/install-error.log"; then
+        log "config.json 写入成功"
+    else
+        log "警告: 写入 config.json 失败（main 首次启动时会补建）"
+    fi
+else
+    log "警告: 找不到内置 Node 运行时，跳过 config.json 创建: ${NODE_BIN}"
+fi
+
+# ---- 引擎状态骨架（幂等，不覆盖已有索引） ----------------------------------
+[ -f "${TRIM_PKGVAR}/strm-index.json" ] || printf '%s\n' '{"version":1,"updatedAt":"","entries":{}}' >"${TRIM_PKGVAR}/strm-index.json" 2>/dev/null || true
+[ -f "${TRIM_PKGVAR}/state.json" ] || printf '%s\n' '{"engine":{},"fnv":{},"paths":{}}' >"${TRIM_PKGVAR}/state.json" 2>/dev/null || true
+
+# ---- root 时修正属主（非 root 跳过） ---------------------------------------
+if is_root && id "${APP_USER}" >/dev/null 2>&1; then
+    chown -R "${APP_USER}:${APP_GROUP}" "${TRIM_PKGVAR}" 2>/dev/null || true
+    chmod 750 "${TRIM_PKGVAR}" 2>/dev/null || true
+fi
+
+log "安装初始化完成"
+log "  数据目录: ${TRIM_PKGVAR}"
+log "  STRM 目录: ${STRM_ROOT}"
+log "  Web 端口: 8090"
+exit 0

@@ -1,0 +1,59 @@
+[
+    {
+        "stepTitle": "卸载选项",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "卸载会移除应用本身。<strong>不会</strong>删除你的 STRM 根目录（除非你在下方明确选择删除其中的 .strm 文件）。"
+            },
+            {
+                "type": "radio",
+                "field": "wizard_uninstall_strm_action",
+                "label": "如何处理 STRM 文件",
+                "initValue": "keep",
+                "options": [
+                    {
+                        "label": "保留 STRM 文件和媒体库（推荐）",
+                        "value": "keep"
+                    },
+                    {
+                        "label": "删除本应用索引中记录的 .strm 文件（不删除目录本身）",
+                        "value": "delete"
+                    }
+                ],
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请选择 STRM 文件处理方式"
+                    }
+                ]
+            },
+            {
+                "type": "radio",
+                "field": "wizard_confirm_delete_strm",
+                "label": "二次确认（仅当上面选择「删除」时生效）",
+                "initValue": "no",
+                "options": [
+                    {
+                        "label": "不删除（安全默认）",
+                        "value": "no"
+                    },
+                    {
+                        "label": "确认删除 .strm 文件",
+                        "value": "yes"
+                    }
+                ],
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请选择是否二次确认"
+                    }
+                ]
+            },
+            {
+                "type": "tips",
+                "helpText": "只会删除应用索引 strm-index.json 中记录的 .strm 路径，随后删除该索引；STRM 根目录本身及其中的其他文件不会被递归删除。"
+            }
+        ]
+    }
+]

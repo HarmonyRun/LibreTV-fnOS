@@ -1,0 +1,201 @@
+#!/bin/bash
+# 卸载后回调（root）：
+#   - 默认保留所有用户数据与 STRM 文件
+#   - 仅当向导同时选择 delete + 二次确认 yes 时，
+#     才删除 strm-index.json 中记录的 .strm 文件与索引本身
+#   - best-effort 移除本应用在 STRM 目录上的 trimacl ACE（不递归、不删目录）
+#   - 绝不递归删除用户的 STRM 根目录
+set -u
+
+APP_NAME="libretv"
+APP_USER="libretv"
+APP_GROUP="libretv"
+: "${TRIM_APPDEST:=/var/apps/${APP_NAME}/target}"
+: "${TRIM_PKGVAR:=/var/apps/${APP_NAME}/var}"
+
+NODE_BIN="${TRIM_APPDEST}/node/bin/node"
+TRIMACL_BIN="/usr/trim/bin/trimacl"
+RUN_UID="$(id -u 2>/dev/null || echo unknown)"
+APP_UID="$(id -u "${APP_USER}" 2>/dev/null || true)"
+STRM_ACTION="${wizard_uninstall_strm_action:-keep}"
+CONFIRM="${wizard_confirm_delete_strm:-no}"
+
+log() { echo "[libretv-uninstall] $*"; }
+
+log "处理方式: action=${STRM_ACTION} confirm=${CONFIRM}"
+
+INDEX_FILE="${TRIM_PKGVAR}/strm-index.json"
+CONFIG_FILE="${TRIM_PKGVAR}/config.json"
+
+# ---- 读取 STRM 根目录（用于安全校验与 ACE 清理） ---------------------------
+STRM_ROOT=""
+if [ -x "${NODE_BIN}" ] && [ -f "${CONFIG_FILE}" ]; then
+    STRM_ROOT="$("${NODE_BIN}" -e '
+const fs = require("fs");
+try {
+  const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  process.stdout.write(typeof cfg.strmRoot === "string" ? cfg.strmRoot : "");
+} catch (e) {}
+' "${CONFIG_FILE}" 2>/dev/null)"
+elif command -v python3 >/dev/null 2>&1 && [ -f "${CONFIG_FILE}" ]; then
+    STRM_ROOT="$(python3 - "${CONFIG_FILE}" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    print(cfg.get("strmRoot", "") if isinstance(cfg, dict) else "")
+except Exception:
+    print("")
+PY
+)"
+fi
+
+# ---- best-effort 移除本应用 ACE --------------------------------------------
+remove_trimacl_aces() {
+    local dir="$1" indices idx
+    # trimacl 需要 root；非 root 时 best-effort 跳过
+    [ "${RUN_UID}" = "0" ] || return 0
+    [ -n "${APP_UID}" ] && [ -x "${TRIMACL_BIN}" ] && [ -d "${dir}" ] || return 0
+    indices="$("${TRIMACL_BIN}" "${dir}" 2>/dev/null \
+        | awk -v uid="uid:${APP_UID}" '/^[0-9]+[[:space:]]/ && index($0, uid) {print $1}' \
+        | grep -E '^[0-9]+$' | sort -rn)"
+    for idx in ${indices}; do
+        if "${TRIMACL_BIN}" -x "${idx}" "${dir}" 2>/dev/null; then
+            log "已移除 ACE #${idx} @ ${dir}"
+        fi
+    done
+    return 0
+}
+
+if [ -n "${STRM_ROOT}" ]; then
+    remove_trimacl_aces "${STRM_ROOT}"
+    # 祖先链（仅在 fallback 时可能添加过）
+    p="$(dirname "${STRM_ROOT}")"
+    depth=0
+    while [ -n "${p}" ] && [ "${p}" != "/" ] && [ "${depth}" -lt 6 ]; do
+        case "${p}" in
+        /vol[0-9]*) remove_trimacl_aces "${p}" ;;
+        esac
+        p="$(dirname "${p}")"
+        depth=$((depth + 1))
+    done
+fi
+
+if [ "${STRM_ACTION}" != "delete" ]; then
+    log "保留 STRM 文件与媒体库（默认）"
+    exit 0
+fi
+
+if [ "${CONFIRM}" != "yes" ]; then
+    log "未通过二次确认（wizard_confirm_delete_strm=${CONFIRM}），跳过删除"
+    exit 0
+fi
+
+if [ ! -f "${INDEX_FILE}" ]; then
+    log "未找到索引 ${INDEX_FILE}，无需删除（不会扫描/删除任何目录）"
+    exit 0
+fi
+
+# 提取索引中记录的 .strm 绝对路径（优先 python3，其次内置 node，最后 grep 兜底）
+PATHS_FILE="$(mktemp /tmp/libretv-strm-paths.XXXXXX 2>/dev/null || echo /tmp/libretv-strm-paths.$$)"
+: >"${PATHS_FILE}"
+
+extract_paths() {
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "${INDEX_FILE}" "${PATHS_FILE}" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        idx = json.load(f)
+    entries = idx.get("entries", {}) if isinstance(idx, dict) else {}
+    seen = set()
+    with open(sys.argv[2], "w", encoding="utf-8") as out:
+        for entry in entries.values():
+            if not isinstance(entry, dict):
+                continue
+            for p in entry.get("strmPaths", []) or []:
+                if isinstance(p, str) and p and p not in seen:
+                    seen.add(p)
+                    out.write(p + "\n")
+except Exception as e:
+    sys.stderr.write("parse index failed: %s\n" % e)
+PY
+    elif [ -x "${NODE_BIN}" ]; then
+        "${NODE_BIN}" -e '
+const fs = require("fs");
+try {
+  const idx = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const entries = idx.entries || {};
+  const seen = new Set();
+  const lines = [];
+  for (const key of Object.keys(entries)) {
+    const list = entries[key] && entries[key].strmPaths;
+    if (!Array.isArray(list)) continue;
+    for (const p of list) {
+      if (typeof p === "string" && p && !seen.has(p)) { seen.add(p); lines.push(p); }
+    }
+  }
+  fs.writeFileSync(process.argv[2], lines.join("\n") + (lines.length ? "\n" : ""));
+} catch (e) {}
+' "${INDEX_FILE}" "${PATHS_FILE}" 2>/dev/null
+    else
+        grep -oE '"/[^"]+\.strm"' "${INDEX_FILE}" 2>/dev/null | sed 's/^"//; s/"$//' | sort -u >"${PATHS_FILE}"
+    fi
+}
+extract_paths
+
+TOTAL=0
+DELETED=0
+SKIPPED=0
+
+while IFS= read -r path; do
+    [ -n "${path}" ] || continue
+    TOTAL=$((TOTAL + 1))
+
+    case "${path}" in
+    /*.strm) ;;
+    *)
+        log "跳过非法路径: ${path}"
+        SKIPPED=$((SKIPPED + 1))
+        continue
+        ;;
+    esac
+
+    if [ -n "${STRM_ROOT}" ]; then
+        case "${path}" in
+        "${STRM_ROOT}"/*) ;;
+        *)
+            log "跳过不在 STRM 根目录内的路径: ${path}"
+            SKIPPED=$((SKIPPED + 1))
+            continue
+            ;;
+        esac
+    fi
+
+    if [ -f "${path}" ]; then
+        if rm -f -- "${path}"; then
+            DELETED=$((DELETED + 1))
+            dir="$(dirname "${path}")"
+            while [ -n "${dir}" ] && [ "${dir}" != "/" ] && [ "${dir}" != "${STRM_ROOT}" ]; do
+                rmdir "${dir}" 2>/dev/null || break
+                dir="$(dirname "${dir}")"
+            done
+        else
+            log "删除失败: ${path}"
+        fi
+    else
+        SKIPPED=$((SKIPPED + 1))
+    fi
+done <"${PATHS_FILE}"
+
+rm -f "${PATHS_FILE}" 2>/dev/null || true
+
+if [ "${DELETED}" -gt 0 ] || [ "${TOTAL}" -eq 0 ]; then
+    rm -f "${INDEX_FILE}" && log "已删除索引 ${INDEX_FILE}"
+else
+    log "没有文件被删除，保留索引 ${INDEX_FILE}"
+fi
+
+log "完成: 索引记录 ${TOTAL} 个路径，删除 ${DELETED} 个 .strm 文件，跳过 ${SKIPPED} 个"
+log "STRM 根目录未被删除: ${STRM_ROOT:-<未配置>}"
+exit 0

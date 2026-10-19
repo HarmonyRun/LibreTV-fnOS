@@ -1,0 +1,192 @@
+name: docker-publish
+
+# 推送版本 tag（如 v2.0.1）时自动构建并发布镜像到 GHCR 与 Docker Hub；
+# 也可在 Actions 页面手动触发。
+# GHCR 使用内置 GITHUB_TOKEN，无需配置 secrets；Docker Hub 需在仓库
+# Settings → Secrets and variables → Actions 配置 DOCKER_USERNAME 与
+# DOCKER_PASSWORD（Docker Hub 的 Access Token），未配置时自动降级为仅发布 GHCR。
+#
+# 多架构构建拆分：amd64 与 arm64 各自跑在原生 runner 上（GitHub 公开仓库
+# 免费提供 ubuntu-24.04-arm），按 digest 推送后合并 manifest。QEMU 跨架构
+# 模拟 npm ci / next build 极慢且不稳（Illegal instruction 崩溃），不再使用。
+# Docker Hub 不重新构建：merge 阶段用 imagetools 把 GHCR 的同一组 digest
+# 复制过去，两个 registry 的多架构镜像 digest 完全一致。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  # Docker Hub 双发布目标（固定仓库，无需按 owner 推导）
+  DOCKERHUB_IMAGE: docker.io/bestzwei/libretv
+
+jobs:
+  # 先跑类型检查与单测，避免把坏版本推成镜像
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # tag 触发时强制 tag 与 package.json 版本一致，避免镜像标签与 /api/status 返回值不一致
+      - name: 校验 tag 与 package.json 版本一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v${tag} 与 package.json 版本 ${pkg} 不一致。请改用 npm version ${tag} 更新版本后再推 tag。"
+            exit 1
+          fi
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR 镜像名不允许大写，统一转小写（owner/Repo → owner/repo）
+      - name: 计算镜像名
+        id: image
+        run: echo "name=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # tag v2.0.1 → 2.0.1 / 2.0 / latest 三个标签（在 merge job 里统一打）
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      # 按架构各推一个镜像层（无 tag，由 digest 标识），标签在 merge 阶段合并
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: 导出 digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: 上传 digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      # secrets 上下文不能直接用于 step 的 if（Unrecognized named-value），
+      # 在 job 级 env 先行求值为 true/false，各步骤再用 env 上下文判断
+      HAS_DOCKERHUB_CREDS: ${{ secrets.DOCKER_PASSWORD != '' }}
+    steps:
+      - name: 下载各架构 digest
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: 计算镜像名
+        id: image
+        run: echo "name=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Docker Hub 双发布：凭据未配置时整段跳过（仅发布 GHCR），不影响既有流程
+      - name: 登录 Docker Hub
+        if: env.HAS_DOCKERHUB_CREDS == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      # 与 GHCR 同一组标签规则；标签在各自的 imagetools create 里使用
+      - id: meta-hub
+        if: env.HAS_DOCKERHUB_CREDS == 'true'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      # 纯 registry 元数据操作：把 build job 已推上来的两个架构 digest
+      # 组装成多架构 manifest 并打标签。不要在这里用 build-push-action——
+      # 那会触发一次重新构建（无 context 时更会直接失败）。
+      # 标签从各自 meta 步骤的 outputs.json（单行 JSON）经 jq 展开：
+      # 1) 不要用 DOCKER_METADATA_OUTPUT_JSON 环境变量——两个 meta 步骤会互相覆盖；
+      # 2) 不要内插多行的 outputs.tags——实测在命令替换里只有第一个 tag 生效
+      #    （v2.12.5/v2.12.6 两次发布都只打上了版本号 tag，主.次 与 latest 未更新）。
+      - name: 创建并推送多架构 manifest（GHCR）
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< '${{ steps.meta.outputs.json }}') \
+            $(printf '${{ steps.image.outputs.name }}@sha256:%s ' *)
+
+      # 跨 registry 复制：从 GHCR 的架构 digest 拉取后推到 Docker Hub，
+      # 镜像内容（含 manifest digest）与 GHCR 完全一致，无需重新构建
+      - name: 复制多架构 manifest 到 Docker Hub
+        if: env.HAS_DOCKERHUB_CREDS == 'true'
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< '${{ steps.meta-hub.outputs.json }}') \
+            $(printf '${{ steps.image.outputs.name }}@sha256:%s ' *)

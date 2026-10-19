@@ -1,0 +1,81 @@
+[
+    {
+        "stepTitle": "STRM 媒体库目录",
+        "items": [
+            {
+                "type": "text",
+                "field": "wizard_strm_root",
+                "label": "STRM 文件根目录（留空保持不变）",
+                "desc": "必须是「文件管理」中可见普通文件夹的绝对路径，不要使用应用内部目录。",
+                "placeholder": "/vol2/1000/liberTV/strmdata",
+                "rules": [
+                    {
+                        "pattern": "^$|^/vol[0-9]+/.+",
+                        "message": "请输入 /vol 开头的绝对路径，或留空保持不变"
+                    }
+                ]
+            },
+            {
+                "type": "tips",
+                "helpText": "修改目录不会自动迁移已有的 .strm 文件；如需迁移请先在文件管理中手动复制。原目录中的文件不会被删除。"
+            }
+        ]
+    },
+    {
+        "stepTitle": "访问密码",
+        "items": [
+            {
+                "type": "password",
+                "field": "wizard_password",
+                "label": "LibreTV 访问密码（留空保持不变）",
+                "desc": "保存后需重启应用才能完全生效。",
+                "rules": [
+                    {
+                        "pattern": "^$|.{4,64}",
+                        "message": "密码长度应为 4-64 个字符，或留空保持不变"
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "stepTitle": "飞牛影视自动刷新（可选）",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "填写后，LibreTV 生成/更新 .strm 后会调用飞牛影视 API 刷新对应目录；留空则只使用文件时间戳降级方案。全部留空表示不修改现有配置。"
+            },
+            {
+                "type": "text",
+                "field": "wizard_fnv_base_url",
+                "label": "飞牛影视地址",
+                "placeholder": "http://127.0.0.1:5666"
+            },
+            {
+                "type": "text",
+                "field": "wizard_fnv_username",
+                "label": "飞牛影视用户名"
+            },
+            {
+                "type": "password",
+                "field": "wizard_fnv_password",
+                "label": "飞牛影视密码"
+            },
+            {
+                "type": "text",
+                "field": "wizard_fnv_secret_string",
+                "label": "secret_string（从飞牛影视配置获取）"
+            },
+            {
+                "type": "text",
+                "field": "wizard_fnv_api_key",
+                "label": "api_key"
+            },
+            {
+                "type": "text",
+                "field": "wizard_fnv_library_name",
+                "label": "媒体库名称（留空自动匹配）"
+            }
+        ]
+    }
+]

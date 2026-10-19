@@ -1,0 +1,18 @@
+#!/bin/bash
+# 修改配置前回调（root）：备份 config.json（幂等）
+set -u
+
+APP_NAME="libretv"
+: "${TRIM_PKGVAR:=/var/apps/${APP_NAME}/var}"
+
+CONFIG_FILE="${TRIM_PKGVAR}/config.json"
+
+if [ -f "${CONFIG_FILE}" ]; then
+    cp -a "${CONFIG_FILE}" "${CONFIG_FILE}.bak.$(date '+%Y%m%d%H%M%S')" 2>/dev/null || true
+    ls -1t "${CONFIG_FILE}".bak.* 2>/dev/null | tail -n +4 | while IFS= read -r old; do
+        rm -f -- "${old}" 2>/dev/null || true
+    done
+fi
+
+echo "[libretv-config_init] 配置修改前检查完成"
+exit 0

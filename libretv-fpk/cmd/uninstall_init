@@ -1,0 +1,10 @@
+#!/bin/bash
+# 卸载前回调（root）：仅记录日志，不删除任何用户数据
+set -u
+
+APP_NAME="libretv"
+: "${TRIM_PKGVAR:=/var/apps/${APP_NAME}/var}"
+
+echo "[libretv-uninstall_init] 准备卸载 LibreTV（应用数据目录: ${TRIM_PKGVAR}）"
+echo "[libretv-uninstall_init] 不会自动删除 STRM 根目录"
+exit 0

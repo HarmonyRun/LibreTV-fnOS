@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+dist/
+.cache/
+libretv-fpk/app/node/
+libretv-fpk/app/server/
+libretv/var/
+*.log
+*.tmp
+.DS_Store
+tsconfig.tsbuildinfo

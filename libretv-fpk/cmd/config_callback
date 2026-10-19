@@ -1,0 +1,188 @@
+#!/bin/bash
+# 修改配置后回调（root）：应用向导中的 STRM 目录 / 密码 / 飞牛影视字段到 config.json
+#   - 留空 = 保持原值；写文件使用 tmp + rename 原子替换
+#   - STRM 目录变更时创建、trimacl 授权并实测写入；不迁移、不删除旧目录文件
+set -u
+
+APP_NAME="libretv"
+APP_USER="libretv"
+APP_GROUP="libretv"
+: "${TRIM_APPDEST:=/var/apps/${APP_NAME}/target}"
+: "${TRIM_PKGVAR:=/var/apps/${APP_NAME}/var}"
+
+NODE_BIN="${TRIM_APPDEST}/node/bin/node"
+CONFIG_FILE="${TRIM_PKGVAR}/config.json"
+TRIMACL_BIN="/usr/trim/bin/trimacl"
+RUN_UID="$(id -u 2>/dev/null || echo unknown)"
+APP_UID="$(id -u "${APP_USER}" 2>/dev/null || true)"
+is_root() { [ "${RUN_UID}" = "0" ]; }
+
+log() { echo "[libretv-config] $*"; }
+
+# ---- 权限工具函数 -----------------------------------------------------------
+trimacl_allow() {
+    local dir="$1"
+    if ! is_root; then
+        log "非 root：跳过 trimacl 授权（由「应用设置 → 授权目录」完成）"
+        return 1
+    fi
+    if [ -n "${APP_UID}" ] && [ -x "${TRIMACL_BIN}" ]; then
+        if "${TRIMACL_BIN}" -m "a:u:${APP_UID}:rwxpDaAeEc:sfd" "${dir}" 2>>"${TRIM_PKGVAR}/trimacl.log"; then
+            log "trimacl 授权成功: ${dir}"
+            return 0
+        fi
+        log "警告: trimacl 授权失败: ${dir}"
+        return 1
+    fi
+    return 1
+}
+
+trimacl_ancestors() {
+    local dir="$1" p depth
+    p="$(dirname "${dir}")"
+    depth=0
+    while [ -n "${p}" ] && [ "${p}" != "/" ] && [ "${depth}" -lt 6 ]; do
+        case "${p}" in
+        /vol[0-9]*)
+            if [ -n "${APP_UID}" ] && [ -x "${TRIMACL_BIN}" ]; then
+                "${TRIMACL_BIN}" -m "a:u:${APP_UID}:x:s" "${p}" 2>/dev/null && log "祖先遍历 ACE: ${p}" || true
+            fi
+            ;;
+        esac
+        p="$(dirname "${p}")"
+        depth=$((depth + 1))
+    done
+}
+
+verify_app_write() {
+    local dir="$1" escaped
+    [ -n "${APP_UID}" ] || return 1
+    escaped="$(printf '%s' "${dir}" | sed "s/'/'\\\\''/g")"
+    su -s /bin/sh "${APP_USER}" -c "touch '${escaped}/.write-test' && rm -f '${escaped}/.write-test'" >/dev/null 2>&1
+}
+
+ensure_strm_access() {
+    local dir="$1"
+    if is_root && id "${APP_USER}" >/dev/null 2>&1; then
+        chown "${APP_USER}:${APP_GROUP}" "${dir}" 2>/dev/null || true
+        chmod 2775 "${dir}" 2>/dev/null || true
+    fi
+    trimacl_allow "${dir}" || true
+
+    if verify_app_write "${dir}"; then
+        rm -f "${TRIM_PKGVAR}/perm-needed" 2>/dev/null || true
+        printf 'ok %s %s uid=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${dir}" "${APP_UID:-none}" >"${TRIM_PKGVAR}/perm-ok" 2>/dev/null || true
+        log "应用用户写入测试通过: ${dir}"
+        return 0
+    fi
+
+    log "写入测试失败，尝试为祖先目录添加遍历 ACE"
+    trimacl_ancestors "${dir}"
+    trimacl_allow "${dir}" >/dev/null 2>&1 || true
+    if verify_app_write "${dir}"; then
+        rm -f "${TRIM_PKGVAR}/perm-needed" 2>/dev/null || true
+        printf 'ok %s %s uid=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${dir}" "${APP_UID:-none}" >"${TRIM_PKGVAR}/perm-ok" 2>/dev/null || true
+        log "祖先授权后写入测试通过: ${dir}"
+        return 0
+    fi
+
+    log "警告: 应用用户 ${APP_USER} 仍无法写入 ${dir}，请到「应用设置 → 授权目录」添加该目录"
+    rm -f "${TRIM_PKGVAR}/perm-ok" 2>/dev/null || true
+    printf '%s\n' "${dir}" >"${TRIM_PKGVAR}/perm-needed" 2>/dev/null || true
+    return 1
+}
+
+# ---- 参数 ---------------------------------------------------------------
+STRM_ROOT="${wizard_strm_root:-}"
+PASSWORD="${wizard_password:-}"
+FNV_BASE_URL="${wizard_fnv_base_url:-}"
+FNV_USERNAME="${wizard_fnv_username:-}"
+FNV_PASSWORD="${wizard_fnv_password:-}"
+FNV_SECRET="${wizard_fnv_secret_string:-}"
+FNV_API_KEY="${wizard_fnv_api_key:-}"
+FNV_LIBRARY="${wizard_fnv_library_name:-}"
+
+if [ -n "${STRM_ROOT}" ]; then
+    case "${STRM_ROOT}" in
+    /vol*/@app* | /var/apps* | /usr* | /etc* | /proc* | /sys*)
+        log "错误: STRM 根目录不能位于应用/系统内部目录: ${STRM_ROOT}"
+        exit 1
+        ;;
+    /*) ;;
+    *)
+        log "错误: STRM 根目录必须是绝对路径: ${STRM_ROOT}"
+        exit 1
+        ;;
+    esac
+fi
+
+if [ ! -f "${CONFIG_FILE}" ]; then
+    log "错误: 找不到配置文件 ${CONFIG_FILE}"
+    exit 1
+fi
+if [ ! -x "${NODE_BIN}" ]; then
+    log "错误: 找不到内置 Node 运行时: ${NODE_BIN}"
+    exit 1
+fi
+
+# ---- 原子更新配置 -----------------------------------------------------------
+CHANGED="$("${NODE_BIN}" -e '
+const fs = require("fs");
+const [file, strmRoot, password, fnvBase, fnvUser, fnvPass, fnvSecret, fnvKey, fnvLib] = process.argv.slice(1);
+const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+const changed = [];
+function setStr(obj, key, value, path) {
+  if (typeof value !== "string" || value === "") return;
+  if (obj[key] !== value) {
+    obj[key] = value;
+    changed.push(path);
+  }
+}
+setStr(cfg, "strmRoot", strmRoot, "strmRoot");
+setStr(cfg, "password", password, "password");
+if (!cfg.fnv || typeof cfg.fnv !== "object" || Array.isArray(cfg.fnv)) cfg.fnv = {};
+setStr(cfg.fnv, "baseUrl", fnvBase, "fnv.baseUrl");
+setStr(cfg.fnv, "username", fnvUser, "fnv.username");
+setStr(cfg.fnv, "password", fnvPass, "fnv.password");
+setStr(cfg.fnv, "secretString", fnvSecret, "fnv.secretString");
+setStr(cfg.fnv, "apiKey", fnvKey, "fnv.apiKey");
+setStr(cfg.fnv, "libraryName", fnvLib, "fnv.libraryName");
+if ((fnvUser || fnvSecret || fnvKey) && cfg.fnv.enabled !== true) {
+  cfg.fnv.enabled = true;
+  changed.push("fnv.enabled");
+}
+const tmp = file + ".tmp." + process.pid;
+fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o640 });
+fs.renameSync(tmp, file);
+process.stdout.write(changed.join(", "));
+' "${CONFIG_FILE}" "${STRM_ROOT}" "${PASSWORD}" "${FNV_BASE_URL}" "${FNV_USERNAME}" "${FNV_PASSWORD}" "${FNV_SECRET}" "${FNV_API_KEY}" "${FNV_LIBRARY}" 2>>"${TRIM_PKGVAR}/config-error.log")"
+
+if [ $? -ne 0 ]; then
+    log "错误: 写入 config.json 失败（详见 ${TRIM_PKGVAR}/config-error.log）"
+    exit 1
+fi
+
+if [ -n "${CHANGED}" ]; then
+    log "已更新字段: ${CHANGED}"
+else
+    log "未提供新值，配置保持不变"
+fi
+
+# ---- STRM 目录创建/授权 ------------------------------------------------------
+if [ -n "${STRM_ROOT}" ]; then
+    if mkdir -p "${STRM_ROOT}" 2>/dev/null; then
+        ensure_strm_access "${STRM_ROOT}" || true
+        log "STRM 目录已就绪: ${STRM_ROOT}（不迁移旧目录中的文件）"
+    else
+        log "警告: 无法创建 STRM 目录: ${STRM_ROOT}"
+    fi
+fi
+
+# ---- 属主与权限 -------------------------------------------------------------
+if id "${APP_USER}" >/dev/null 2>&1; then
+    chown "${APP_USER}:${APP_GROUP}" "${CONFIG_FILE}" 2>/dev/null || true
+fi
+chmod 640 "${CONFIG_FILE}" 2>/dev/null || true
+
+log "配置保存完成；密码修改需重启应用后完全生效"
+exit 0

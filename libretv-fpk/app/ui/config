@@ -1,0 +1,14 @@
+{
+    ".url": {
+        "libretv.main": {
+            "title": "LibreTV 影视库",
+            "icon": "images/icon_256.png",
+            "type": "url",
+            "protocol": "http",
+            "port": "8090",
+            "url": "/",
+            "allUsers": true,
+            "desc": "LibreTV 影视库与 STRM 媒体库管理界面"
+        }
+    }
+}

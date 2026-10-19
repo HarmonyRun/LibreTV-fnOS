@@ -1,0 +1,33 @@
+#!/bin/bash
+# 安装前回调：尽力创建运行期目录骨架，任何失败都不阻断安装（真正的创建在 install_callback）
+set -u
+
+APP_NAME="libretv"
+APP_USER="libretv"
+APP_GROUP="libretv"
+: "${TRIM_APPDEST:=/var/apps/${APP_NAME}/target}"
+: "${TRIM_PKGVAR:=/var/apps/${APP_NAME}/var}"
+
+log() { echo "[libretv-install_init] $*"; }
+
+# 诊断信息（临时）：记录调用身份与环境，便于排查 appcenter 回调上下文
+{
+    printf '%s uid=%s user=%s TRIM_APPDEST=%s TRIM_PKGVAR=%s TRIM_APPDEST_VOL=%s\n' \
+        "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$(id -u 2>/dev/null)" "$(whoami 2>/dev/null)" \
+        "${TRIM_APPDEST:-}" "${TRIM_PKGVAR:-}" "${TRIM_APPDEST_VOL:-}"
+} >>/tmp/libretv_install_init.log 2>/dev/null || true
+
+# 尽力创建目录骨架（非 root 或目录尚不存在时允许失败）
+if mkdir -p "${TRIM_PKGVAR}/queue/processing" "${TRIM_PKGVAR}/queue/failed" "${TRIM_PKGVAR}/logs" 2>/dev/null; then
+    log "数据目录骨架已就绪: ${TRIM_PKGVAR}"
+else
+    log "跳过目录骨架创建（当前用户 $(id -u 2>/dev/null) 无权限或目录尚未创建），将由 install_callback 完成"
+fi
+touch "${TRIM_PKGVAR}/app.log" 2>/dev/null || true
+
+# 仅 root 时调整属主（无权限时忽略）
+if [ "$(id -u 2>/dev/null)" = "0" ] && id "${APP_USER}" >/dev/null 2>&1; then
+    chown -R "${APP_USER}:${APP_GROUP}" "${TRIM_PKGVAR}" 2>/dev/null || true
+fi
+
+exit 0

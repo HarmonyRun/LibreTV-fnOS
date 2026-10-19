@@ -1,0 +1,16 @@
+appname               = libretv
+version               = 1.0.2
+display_name          = LibreTV 影视库
+desc                  = LibreTV 影视库：内置 STRM 引擎，把 CMS 影视资源生成 .strm 文件供飞牛影视（FnV）扫描播放，支持定时增量同步与飞牛影视自动刷新。免责声明：本应用为第三方封装版本，基于开源项目 LibreTV 构建，仅用于技术学习与研究，所有片源与内容均来自第三方网络，与封装者无关。如涉及版权问题请联系删除。
+platform              = x86
+arch                  = x86_64
+source                = thirdparty
+maintainer            = fpk-dev
+distributor           = fpk-dev
+desktop_uidir         = ui
+desktop_applaunchname = libretv.main
+os_min_version        = 1.1.8
+service_port          = 8090
+checkport             = true
+ctl_stop              = true
+install_type          = 

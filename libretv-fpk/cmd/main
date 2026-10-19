@@ -1,0 +1,343 @@
+#!/bin/bash
+# LibreTV 影视库 - 应用生命周期入口（由 fnOS 以应用用户 libretv 执行）
+# 单进程模型：内置 Node 22 运行 $TRIM_APPDEST/server/start.js
+#   start.js 内部先启动 STRM 引擎，再启动 Next standalone HTTP 服务（8090）。
+set -u
+
+APP_NAME="libretv"
+: "${TRIM_APPDEST:=/var/apps/${APP_NAME}/target}"
+: "${TRIM_PKGVAR:=/var/apps/${APP_NAME}/var}"
+: "${TRIM_SERVICE_PORT:=8090}"
+
+DATA_DIR="${TRIM_PKGVAR}"
+LOG_FILE="${DATA_DIR}/app.log"
+PID_FILE="${DATA_DIR}/app.pid"
+NODE_BIN="${TRIM_APPDEST}/node/bin/node"
+SERVER_DIR="${TRIM_APPDEST}/server"
+SERVER_ENTRY="${SERVER_DIR}/start.js"
+PORT="${TRIM_SERVICE_PORT}"
+
+DEFAULT_PASSWORD="libretv"
+DEFAULT_SOURCES_JSON='[{"key":"env_0","name":"电影天堂资源","url":"https://caiji.dyttzyapi.com/api.php/provide/vod"},{"key":"env_1","name":"量子资源","url":"https://cj.lziapi.com/api.php/provide/vod"},{"key":"env_2","name":"如意资源","url":"https://cj.rycjapi.com/api.php/provide/vod"},{"key":"env_3","name":"优质资源","url":"https://api.yzzy-api.com/inc/apijson.php"}]'
+
+log_msg() {
+    mkdir -p "${DATA_DIR}" 2>/dev/null
+    printf '%s [main] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "${LOG_FILE}" 2>/dev/null
+}
+
+check_process() {
+    [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
+}
+
+pid_of() {
+    [ -r "${PID_FILE}" ] && head -n 1 "${PID_FILE}" 2>/dev/null | tr -d '[:space:]'
+}
+
+is_running() {
+    local pid
+    pid="$(pid_of)"
+    [ -n "${pid}" ] && check_process "${pid}"
+}
+
+# 从 config.json 读取字符串字段（支持点号路径），失败/空返回默认值
+read_config_value() {
+    local path="$1" fallback="${2:-}"
+    if [ ! -x "${NODE_BIN}" ]; then
+        printf '%s' "${fallback}"
+        return 0
+    fi
+    local out
+    out="$("${NODE_BIN}" -e '
+const fs = require("fs");
+try {
+  const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const v = String(process.argv[2]).split(".").reduce((o, k) => (o == null ? o : o[k]), cfg);
+  if (typeof v === "string" && v.length) process.stdout.write(v);
+} catch (e) {}
+' "${DATA_DIR}/config.json" "${path}" 2>/dev/null)"
+    if [ -n "${out}" ]; then
+        printf '%s' "${out}"
+    else
+        printf '%s' "${fallback}"
+    fi
+}
+
+# 从 config.json 的 sources 生成 DEFAULT_SOURCES（Next 进程读取）
+read_sources_json() {
+    if [ ! -x "${NODE_BIN}" ]; then
+        printf '%s' "${DEFAULT_SOURCES_JSON}"
+        return 0
+    fi
+    local out
+    out="$("${NODE_BIN}" -e '
+const fs = require("fs");
+try {
+  const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const list = Array.isArray(cfg.sources) ? cfg.sources : [];
+  const mapped = list
+    .filter((s) => s && typeof s.url === "string" && /^https?:\/\//.test(s.url))
+    .map((s, i) => {
+      const item = { name: typeof s.name === "string" && s.name ? s.name : "源" + (i + 1), url: s.url };
+      if (typeof s.detail === "string" && s.detail) item.detail = s.detail;
+      if (s.isAdult === true) item.isAdult = true;
+      return item;
+    });
+  if (mapped.length) process.stdout.write(JSON.stringify(mapped));
+} catch (e) {}
+' "${DATA_DIR}/config.json" 2>/dev/null)"
+    if [ -n "${out}" ]; then
+        printf '%s' "${out}"
+    else
+        printf '%s' "${DEFAULT_SOURCES_JSON}"
+    fi
+}
+
+# config.json 缺失时由首次启动补建（install_callback 非 root/写失败时的兜底）
+# strmRoot/password 优先级：install-vars.json（var → /tmp）> 默认值
+ensure_config() {
+    [ -f "${DATA_DIR}/config.json" ] && return 0
+    [ -x "${NODE_BIN}" ] || return 0
+    mkdir -p "${DATA_DIR}" 2>/dev/null || true
+    local default_root="${LIBRETV_DEFAULT_STRM_ROOT:-/vol2/1000/liberTV/strmdata}"
+    log_msg "config.json 不存在，创建默认配置（可用 install-vars.json 覆盖）"
+    if "${NODE_BIN}" -e '
+const fs = require("fs");
+const [file, defaultRoot, varsVar, varsTmp] = process.argv.slice(1);
+let strmRoot = defaultRoot;
+let password = "libretv";
+for (const vf of [varsVar, varsTmp]) {
+  try {
+    const v = JSON.parse(fs.readFileSync(vf, "utf8"));
+    if (typeof v.strmRoot === "string" && v.strmRoot) strmRoot = v.strmRoot;
+    if (typeof v.password === "string" && v.password) password = v.password;
+    break;
+  } catch (e) {}
+}
+const cfg = {
+  port: 8090,
+  password,
+  strmRoot,
+  syncIntervalHours: 6,
+  movieLibraryName: "LibreTV 电影",
+  tvLibraryName: "LibreTV 剧集",
+  fnv: {
+    enabled: true,
+    baseUrl: "http://127.0.0.1:5666",
+    appName: "trimemedia-web",
+    username: "",
+    password: "",
+    secretString: "NDzZTVxnRKP8Z0jXg1VAMonaG8akvh",
+    apiKey: "16CCEB3D-AB42-077D-36A1-F355324E4237",
+    libraryName: ""
+  },
+  sources: [
+    { key: "env_0", name: "电影天堂资源", url: "https://caiji.dyttzyapi.com/api.php/provide/vod" },
+    { key: "env_1", name: "量子资源", url: "https://cj.lziapi.com/api.php/provide/vod" },
+    { key: "env_2", name: "如意资源", url: "https://cj.rycjapi.com/api.php/provide/vod" },
+    { key: "env_3", name: "优质资源", url: "https://api.yzzy-api.com/inc/apijson.php" }
+  ]
+};
+fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o640 });
+' "${DATA_DIR}/config.json" "${default_root}" "${DATA_DIR}/install-vars.json" "/tmp/libretv-install-vars.json" 2>/dev/null; then
+        log_msg "默认 config.json 已创建"
+    else
+        log_msg "创建默认 config.json 失败（数据目录可能不可写）"
+    fi
+}
+
+# 以应用用户身份实测 STRM 目录可写，并维护 perm-ok / perm-needed
+refresh_perm_marker() {
+    [ -f "${DATA_DIR}/config.json" ] || return 0
+    local root
+    root="$(read_config_value "strmRoot" "")"
+    [ -n "${root}" ] || return 0
+    if [ ! -d "${root}" ]; then
+        log_msg "STRM 根目录不存在: ${root}"
+        return 0
+    fi
+    if (touch "${root}/.write-test" 2>/dev/null && rm -f "${root}/.write-test" 2>/dev/null); then
+        rm -f "${DATA_DIR}/perm-needed" 2>/dev/null || true
+        printf 'ok %s %s uid=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${root}" "$(id -u 2>/dev/null)" >"${DATA_DIR}/perm-ok" 2>/dev/null || true
+    else
+        rm -f "${DATA_DIR}/perm-ok" 2>/dev/null || true
+        printf '%s\n' "${root}" >"${DATA_DIR}/perm-needed" 2>/dev/null || true
+        log_msg "警告: 当前用户无法写入 STRM 根目录 ${root}；请到「应用设置 → 授权目录」添加该目录"
+    fi
+}
+
+# 启动前检查 STRM 根目录，不存在时尽力补建
+ensure_strm_root() {
+    local root
+    root="$(read_config_value "strmRoot" "")"
+    if [ -z "${root}" ]; then
+        log_msg "config.strmRoot 为空，跳过目录检查（请在应用设置中配置）"
+        return 0
+    fi
+    if [ -d "${root}" ]; then
+        return 0
+    fi
+    log_msg "STRM 根目录不存在，尝试创建: ${root}"
+    if mkdir -p "${root}" 2>>"${LOG_FILE}"; then
+        log_msg "已创建 STRM 根目录: ${root}"
+    else
+        log_msg "创建 STRM 根目录失败（可能缺少父目录权限），Web 继续启动: ${root}"
+    fi
+    return 0
+}
+
+# HTTP 探活：/api/auth 未登录也返回 200；失败再试 /
+http_probe() {
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/api/auth" >/dev/null 2>&1; then
+            return 0
+        fi
+        if curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/" >/dev/null 2>&1; then
+            return 0
+        fi
+        return 1
+    fi
+    if [ -x "${NODE_BIN}" ]; then
+        "${NODE_BIN}" -e '
+const port = process.argv[1];
+const ctrl = new AbortController();
+const timer = setTimeout(() => ctrl.abort(), 3000);
+fetch("http://127.0.0.1:" + port + "/api/auth", { signal: ctrl.signal })
+  .then((r) => { clearTimeout(timer); process.exit(r.ok ? 0 : 1); })
+  .catch(() => { clearTimeout(timer); process.exit(1); });
+' "${PORT}" >/dev/null 2>&1
+        return $?
+    fi
+    return 1
+}
+
+start_process() {
+    if is_running; then
+        log_msg "LibreTV 已在运行 (pid $(pid_of))"
+        return 0
+    fi
+    rm -f "${PID_FILE}"
+
+    mkdir -p "${DATA_DIR}/queue" "${DATA_DIR}/logs" 2>/dev/null
+    ensure_config
+    ensure_strm_root
+    refresh_perm_marker
+
+    # 授权标记：install_callback/config_callback 实测写入成功后写入 perm-ok
+    if [ -f "${DATA_DIR}/config.json" ] && [ ! -f "${DATA_DIR}/perm-ok" ]; then
+        log_msg "提示: 未检测到 STRM 目录授权标记（perm-ok）；若 .strm 无法生成，请到「应用设置 → 授权目录」添加 STRM 根目录"
+    fi
+
+    if [ ! -x "${NODE_BIN}" ]; then
+        log_msg "错误: 找不到内置 Node 运行时: ${NODE_BIN}"
+        return 1
+    fi
+    if [ ! -f "${SERVER_ENTRY}" ]; then
+        log_msg "错误: 找不到服务入口: ${SERVER_ENTRY}"
+        return 1
+    fi
+
+    local password sources
+    password="$(read_config_value "password" "${DEFAULT_PASSWORD}")"
+    sources="$(read_sources_json)"
+    log_msg "启动 LibreTV: node=${NODE_BIN} port=${PORT} data=${DATA_DIR}"
+
+    (
+        cd "${SERVER_DIR}" || exit 1
+        export LIBRETV_DATA_DIR="${DATA_DIR}"
+        export TRIM_PKGVAR="${DATA_DIR}"
+        export TRIM_APPDEST="${TRIM_APPDEST}"
+        export TRIM_SERVICE_PORT="${PORT}"
+        export PORT="${PORT}"
+        export HOSTNAME="0.0.0.0"
+        export NODE_ENV="production"
+        export NEXT_TELEMETRY_DISABLED="1"
+        export PASSWORD="${password}"
+        export DEFAULT_SOURCES="${sources}"
+        exec "${NODE_BIN}" "${SERVER_ENTRY}"
+    ) >> "${LOG_FILE}" 2>&1 &
+
+    local pid=$!
+    printf '%s' "${pid}" > "${PID_FILE}"
+
+    # 等待 HTTP 就绪（最多 20s），让 checkport 探测更稳
+    local i=0
+    while [ "${i}" -lt 20 ]; do
+        if ! check_process "${pid}"; then
+            log_msg "启动失败: 进程已退出，详见 ${LOG_FILE}"
+            rm -f "${PID_FILE}"
+            return 1
+        fi
+        if http_probe; then
+            log_msg "启动成功 (pid ${pid}, port ${PORT})"
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
+    if check_process "${pid}"; then
+        log_msg "进程已启动但 HTTP 探活超时（pid ${pid}），继续等待服务就绪"
+        return 0
+    fi
+    log_msg "启动失败: 进程已退出，详见 ${LOG_FILE}"
+    rm -f "${PID_FILE}"
+    return 1
+}
+
+stop_process() {
+    local pid
+    pid="$(pid_of)"
+    if [ -z "${pid}" ] || ! check_process "${pid}"; then
+        log_msg "LibreTV 未运行，无需停止"
+        rm -f "${PID_FILE}"
+        return 0
+    fi
+
+    log_msg "停止 LibreTV (pid ${pid})"
+    kill -TERM "${pid}" 2>/dev/null
+    local i=0
+    while check_process "${pid}" && [ "${i}" -lt 15 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if check_process "${pid}"; then
+        log_msg "TERM 超时，发送 KILL (pid ${pid})"
+        kill -KILL "${pid}" 2>/dev/null
+        sleep 1
+    fi
+    rm -f "${PID_FILE}"
+    log_msg "已停止"
+    return 0
+}
+
+status_app() {
+    local pid
+    pid="$(pid_of)"
+    if [ -z "${pid}" ] || ! check_process "${pid}"; then
+        [ -n "${pid}" ] && rm -f "${PID_FILE}"
+        return 3
+    fi
+    if http_probe; then
+        return 0
+    fi
+    return 3
+}
+
+case "${1:-}" in
+start)
+    start_process
+    exit $?
+    ;;
+stop)
+    stop_process
+    exit $?
+    ;;
+status)
+    status_app
+    exit $?
+    ;;
+*)
+    echo "Usage: $0 {start|stop|status}" >&2
+    exit 1
+    ;;
+esac

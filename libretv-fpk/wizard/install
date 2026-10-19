@@ -1,0 +1,65 @@
+[
+    {
+        "stepTitle": "STRM 媒体库目录",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "LibreTV 会把影视资源生成为 <strong>.strm</strong> 文件，写入下面的目录，供<strong>飞牛影视</strong>添加目录后扫描播放。"
+            },
+            {
+                "type": "text",
+                "field": "wizard_strm_root",
+                "label": "STRM 文件根目录（绝对路径）",
+                "desc": "必须在「文件管理」中创建普通文件夹，然后复制其绝对路径粘贴到这里。不要使用应用内部目录（如 /var/apps、/@appdata、/@appconf）。",
+                "helpText": "必须在文件管理中创建普通文件夹并复制绝对路径，不要用应用内部目录。",
+                "initValue": "/vol2/1000/liberTV/strmdata",
+                "placeholder": "/vol2/1000/liberTV/strmdata",
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请填写 STRM 根目录"
+                    },
+                    {
+                        "pattern": "^/vol[0-9]+/.+",
+                        "message": "请输入 /vol 开头的绝对路径，例如 /vol2/1000/liberTV/strmdata"
+                    }
+                ]
+            },
+            {
+                "type": "tips",
+                "helpText": "安装后可在「应用设置 → 配置」中修改该目录与访问密码。"
+            },
+            {
+                "type": "tips",
+                "helpText": "<strong>重要：</strong>安装完成后需在「应用中心 → LibreTV → 应用设置 → 授权目录」把上面填写的 STRM 目录添加为<strong>读写</strong>，飞牛才会给应用用户授权写入（这是飞牛应用的权限模型要求）。"
+            }
+        ]
+    },
+    {
+        "stepTitle": "访问密码",
+        "items": [
+            {
+                "type": "password",
+                "field": "wizard_password",
+                "label": "LibreTV 访问密码",
+                "desc": "登录 LibreTV Web 界面时使用，后续可在应用设置中修改。",
+                "initValue": "libretv",
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请填写访问密码"
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "stepTitle": "完成",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "<strong>安装完成后：</strong>1) 打开 LibreTV，进入设置确认 STRM 目录；2) 在飞牛影视中把该目录添加为媒体库；3) 在 LibreTV 详情页点击「加入媒体库」生成 .strm。"
+            }
+        ]
+    }
+]
