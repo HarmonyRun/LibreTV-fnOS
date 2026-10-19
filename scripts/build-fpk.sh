@@ -144,6 +144,14 @@ if [ -f "$LIBRETV_DIR/engine/index.js" ]; then
         warn "缺少 libretv/mcp：MCP 功能不可用"
     fi
 
+    info "复制自更新服务 updater/"
+    if [ -d "$LIBRETV_DIR/updater" ]; then
+        rm -rf "$APP_SERVER/updater"
+        cp -R "$LIBRETV_DIR/updater" "$APP_SERVER/updater"
+    else
+        warn "缺少 libretv/updater：OTA 自更新不可用"
+    fi
+
     info "复制影视兼容代理 mediaserver/"
     if [ -d "$LIBRETV_DIR/mediaserver" ]; then
         rm -rf "$APP_SERVER/mediaserver"
@@ -172,6 +180,8 @@ find "$APP_SERVER" -name '*.DS_Store' -type f -delete 2>/dev/null || true
 
 [ -f "$APP_SERVER/server.js" ] || die "组装失败：app/server/server.js 不存在"
 [ -d "$APP_SERVER/node_modules/next" ] || die "组装失败：app/server/node_modules/next 不存在"
+printf '{"name":"LibreTV-fnOS","version":"%s","builtAt":"%s"}\n' "${APP_VERSION}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$APP_SERVER/version.json"
+
 info "app/server 大小: $(human_size "$APP_SERVER")"
 
 # 归一化打包权限：cmd 可执行、配置/素材可读；避免源文件 600 权限带入 fpk
@@ -304,6 +314,13 @@ esac
 REMOTE_FPK="$("$SSH_WRAPPER" "ls -1t '${REMOTE_DIR}'/*.fpk 2>/dev/null | head -n 1" | tr -d '\r' | head -n 1)"
 [ -n "$REMOTE_FPK" ] || die "远端未找到 .fpk 产物"
 info "远端产物: ${REMOTE_FPK}"
+
+step "生成本地更新包（OTA payload）"
+mkdir -p "$DIST_DIR"
+UPDATE_TGZ="$DIST_DIR/libretv-update-${APP_VERSION}.tar.gz"
+COPYFILE_DISABLE=1 tar --format=ustar -czf "$UPDATE_TGZ" -C "$APP_SERVER" --exclude './var' --exclude './.DS_Store' . 2>/dev/null \
+    || COPYFILE_DISABLE=1 tar -czf "$UPDATE_TGZ" -C "$APP_SERVER" --exclude './var' --exclude './.DS_Store' .
+info "更新包: ${UPDATE_TGZ}（$(human_size "${UPDATE_TGZ}")，SHA256 $(shasum -a 256 "${UPDATE_TGZ}" | awk '{print $1}')）"
 
 step "取回 fpk 到 dist/"
 mkdir -p "$DIST_DIR"

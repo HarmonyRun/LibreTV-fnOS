@@ -21,7 +21,14 @@ const indexStore = require('../engine/index-store');
 const { FnvClient } = require('../engine/fnv-client');
 
 const DEFAULT_PORT = 8092;
-const VERSION = '1.0.3';
+const VERSION = (() => {
+  try {
+    const v = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'version.json'), 'utf8'));
+    return String(v.version || '1.0.4');
+  } catch {
+    return '1.0.4';
+  }
+})();
 const MAX_BODY = 2 * 1024 * 1024;
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const DEFAULT_SOURCES = [

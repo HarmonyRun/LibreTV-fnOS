@@ -296,3 +296,14 @@ engine 处理完成后：
   资源：libretv://library / libretv://status / libretv://sources；
 - 写操作复用 `queue/` 与 `strm-index.json` 契约，删除操作限制在 STRM 根目录内且仅限索引引用文件；
 - 中继（FN Connect）只暴露主网关，8090/8092 不可达；MCP 用于局域网/公网直连场景。
+
+## 15. OTA 自动更新（1.0.7）
+
+- 代码：`libretv/updater/index.js`（检查/下载/校验/替换/重启，127.0.0.1:8093），
+  Next 代理 `src/app/api/update/route.ts`，UI `src/components/update-notice.tsx`；
+- 版本来源：`server/version.json`（构建写入）；Release 资产 `libretv-update-<ver>.tar.gz`；
+- 下载：GitHub API 资产地址 + `Accept: application/octet-stream`（避开 github.com 直连问题），
+  release digest sha256 校验；
+- 替换：`target/server.new-<ver>` → 校验 → 原子重命名；保留 `server.old-<旧版>`；
+- 重启：`cmd/main stop/start`（`/var/apps/<app>/cmd/main`），健康检查失败自动回滚；
+- 不影响 var/ 配置、STRM、MCP、飞牛影视媒体库。

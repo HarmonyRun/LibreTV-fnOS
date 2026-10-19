@@ -122,6 +122,35 @@ try {
   log('error', `MCP 启动失败（主 Web 继续运行）: ${err && err.stack ? err.stack : err}`);
 }
 
+// ---- 启动应用内自更新（OTA） -------------------------------------------------
+let updaterHandle = null;
+try {
+  const cfg = (() => {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8'));
+    } catch {
+      return {};
+    }
+  })();
+  const updCfg = cfg && cfg.update && typeof cfg.update === 'object' ? cfg.update : {};
+  if (updCfg.enabled !== false) {
+    const { createUpdater } = require(path.join(__dirname, 'updater', 'index.js'));
+    updaterHandle = createUpdater({
+      dataDir,
+      logger: { log, info: (m) => log('info', m), warn: (m) => log('warn', m), error: (m) => log('error', m) },
+      repo: updCfg.repo,
+      port: updCfg.port,
+      intervalHours: updCfg.intervalHours,
+      enabled: true,
+    });
+    updaterHandle.start();
+  } else {
+    log('info', '自动更新已禁用（config.update.enabled=false）');
+  }
+} catch (err) {
+  log('error', `更新服务启动失败（不影响主服务）: ${err && err.stack ? err.stack : err}`);
+}
+
 // ---- 优雅退出 ----------------------------------------------------------------
 let stopping = false;
 function shutdown(signal) {
@@ -132,6 +161,7 @@ function shutdown(signal) {
     if (engineHandle && typeof engineHandle.stop === 'function') engineHandle.stop();
     if (mediaProxyHandle && typeof mediaProxyHandle.stop === 'function') mediaProxyHandle.stop();
     if (mcpHandle && typeof mcpHandle.stop === 'function') mcpHandle.stop();
+    if (updaterHandle && typeof updaterHandle.stop === 'function') updaterHandle.stop();
   } catch (err) {
     log('error', `停止引擎失败: ${err && err.message}`);
   }

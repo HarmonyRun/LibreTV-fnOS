@@ -10,6 +10,7 @@ import { requestShowDownloadManager } from './download-manager';
 import { Icon } from './icon';
 import { SearchHistoryDropdown, useSearchHistory } from './search-history';
 import { StrmGuideBar } from './strm-guide';
+import { UpdateNotice } from './update-notice';
 import { cn } from '@/lib/utils';
 import { OPEN_SETTINGS_EVENT, type OpenSettingsDetail } from '@/lib/settings-events';
 
@@ -133,6 +134,7 @@ export function Header({ showSearch = false }: { showSearch?: boolean }) {
             <HeaderLink href="/about" active={pathname === '/about'}>
               关于
             </HeaderLink>
+            <UpdateNotice />
             <ThemeToggle />
             <IconButton label="观看历史" onClick={() => setHistoryOpen(true)}>
               <Icon name="clock" />

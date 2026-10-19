@@ -155,3 +155,15 @@
   - stdio 桥接 `mcp/stdio-bridge.js` 实测可完成 initialize/tools/list。
 - 安全：Bearer Token 鉴权；删除仅限 STRM 根目录内且被索引引用的文件；Token 可随时重置。
 - 限制：FN Connect 中继只暴露 fnOS 主网关，8090/8092 在中继下不可达，MCP 请在局域网/公网直连环境使用。
+
+## 11. OTA 自动更新验证（1.0.7）
+
+- 更新器随 start.js 启动（127.0.0.1:8093），检查 GitHub Releases；UI 顶部显示更新提醒；
+- 实测：从 1.0.6 点击/调用更新到 1.0.7：
+  - 下载走 GitHub API 资产（objects.githubusercontent.com）+ sha256 digest 校验；
+  - 解压校验通过后原子替换 `target/server`，保留 `server.old-1.0.6`；
+  - 重启脚本经 `cmd/main` 自动重启，健康检查通过（新版本 1.0.7 启动成功）；
+  - 8090/8091/8092/8093 全部恢复，MCP 版本同步为 1.0.7；
+  - `strm-index.json` 4 条目、90 个 STRM 文件全部保留；
+  - 飞牛应用中心版本仍为安装的 1.0.4（OTA 不改应用中心记录），应用内版本为 1.0.7；
+- 安全：仅 GitHub Release 资产、digest 校验、失败自动回滚、仅应用用户权限。
