@@ -1,0 +1,54 @@
+# ============================================================
+# LibreTV-fnOS Clash 直连规则
+# 把 rules 里的条目放到你配置 rules 列表的【最顶部】
+# （必须在 MATCH / GEOIP / 通用 PROXY 规则之前，否则不会生效）
+# ============================================================
+rules:
+  # 飞牛 FN Connect / 中继与系统服务（避免走代理）
+  - DOMAIN-SUFFIX,fnos.net,DIRECT
+  - DOMAIN-SUFFIX,fnnas.com,DIRECT
+  # ===== 采集站 CDN 直连（否则海外代理出口常见 403/404）=====
+  - DOMAIN-SUFFIX,bfikuncdn.com,DIRECT
+  - DOMAIN-SUFFIX,bfvvs.com,DIRECT
+  - DOMAIN-SUFFIX,cdnlz29.com,DIRECT
+  - DOMAIN-SUFFIX,dytt-broadcast.com,DIRECT
+  - DOMAIN-SUFFIX,dytt-kan.com,DIRECT
+  - DOMAIN-SUFFIX,dytt-live.com,DIRECT
+  - DOMAIN-SUFFIX,dytt-tvs.com,DIRECT
+  - DOMAIN-SUFFIX,feifei-online.com,DIRECT
+  - DOMAIN-SUFFIX,ffzy-online2.com,DIRECT
+  - DOMAIN-SUFFIX,ffzy-play6.com,DIRECT
+  - DOMAIN-SUFFIX,ffzy-play8.com,DIRECT
+  - DOMAIN-SUFFIX,ffzy-play9.com,DIRECT
+  - DOMAIN-SUFFIX,high23-playback.com,DIRECT
+  - DOMAIN-SUFFIX,high24-playback.com,DIRECT
+  - DOMAIN-SUFFIX,high25-playback.com,DIRECT
+  - DOMAIN-SUFFIX,high26-playback.com,DIRECT
+  - DOMAIN-SUFFIX,jisuzyv.com,DIRECT
+  - DOMAIN-SUFFIX,lz-cdn1.com,DIRECT
+  - DOMAIN-SUFFIX,lzcdn1.com,DIRECT
+  - DOMAIN-SUFFIX,lzcdn2.com,DIRECT
+  - DOMAIN-SUFFIX,lzcdn10.com,DIRECT
+  - DOMAIN-SUFFIX,lzcdn27.com,DIRECT
+  - DOMAIN-SUFFIX,lzcdn28.com,DIRECT
+  - DOMAIN-SUFFIX,maoyanplay.top,DIRECT
+  - DOMAIN-SUFFIX,ryplay11.com,DIRECT
+  - DOMAIN-SUFFIX,ryplay13.com,DIRECT
+  - DOMAIN-SUFFIX,ryplay15.com,DIRECT
+  - DOMAIN-SUFFIX,ryplay16.com,DIRECT
+  - DOMAIN-SUFFIX,ryplay3.com,DIRECT
+  - DOMAIN-SUFFIX,yyzy-play.vip,DIRECT
+  - DOMAIN-SUFFIX,yzzy27-play.com,DIRECT
+  - DOMAIN-SUFFIX,yzzy28-play.com,DIRECT
+  - DOMAIN-SUFFIX,yzzy32-play.com,DIRECT
+  - DOMAIN-SUFFIX,zuidazym3u8.com,DIRECT
+  # ===== 以下为 mihomo / Clash Verge Rev 可选的按家族匹配（可选，取消注释使用）=====
+  # - DOMAIN-REGEX,^(.+\.)?lzcdn\d+\.com$,DIRECT
+  # - DOMAIN-REGEX,^(.+\.)?lz-cdn\d+\.com$,DIRECT
+  # - DOMAIN-REGEX,^(.+\.)?ffzy-(play|online)\d*\.com$,DIRECT
+  # - DOMAIN-REGEX,^(.+\.)?ryplay\d+\.com$,DIRECT
+  # - DOMAIN-REGEX,^(.+\.)?high\d+-playback\.com$,DIRECT
+  # - DOMAIN-REGEX,^(.+\.)?yzzy\d+-play\.com$,DIRECT
+  # ===== 原有规则接在这里 =====
+  # - GEOIP,CN,DIRECT
+  # - MATCH,PROXY

@@ -260,6 +260,9 @@ MediaWarp/fntv-proxy 这类代理；本应用把该能力内置，避免额外�
 > 已实测：FN Connect 中继环境下，使用飞牛影视原生页面播放《沙丘》《庆余年》成功。
 > 远程观看者无需打开 LibreTV（8090 仅用于管理员搜索与同步）。
 > 个别源若在远程网络不可达/防盗链，请换源重新「加入媒体库」。详见 [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md)。
+>
+> **Clash 用户注意**：如果使用代理，采集站 CDN 很可能对代理出口返回 403/404，导致「STRM 直连播放异常」。
+> 请按 [docs/CLASH-RULES.md](docs/CLASH-RULES.md) 把 CDN 域名加入 DIRECT（规则文件：[clash/rules-snippet.yaml](clash/rules-snippet.yaml)）。
 
 ## 十一、许可证与致谢
 
