@@ -249,7 +249,19 @@ MediaWarp/fntv-proxy 这类代理；本应用把该能力内置，避免额外�
 
 ---
 
-## 十、许可证与致谢
+## 十、远程访问（FN Connect / 飞牛中继）
+
+| 访问方式 | 推荐入口 | 说明 |
+|---|---|---|
+| 局域网 | LibreTV 8090 + 「影视库」8091 | 兼容代理中转，兼容性最好 |
+| 公网直连（有公网 IP/端口映射） | 同上 | 8090/8091 可达即可 |
+| **FN Connect / 二级域名 / 飞牛中继** | **飞牛影视原生页面/App** | 中继只转发 fnOS 网关端口，8090/8091 不可达；原生播放由客户端直连源站，不占 NAS/中继带宽 |
+
+> 已实测：FN Connect 中继环境下，使用飞牛影视原生页面播放《沙丘》《庆余年》成功。
+> 远程观看者无需打开 LibreTV（8090 仅用于管理员搜索与同步）。
+> 个别源若在远程网络不可达/防盗链，请换源重新「加入媒体库」。详见 [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md)。
+
+## 十一、许可证与致谢
 
 - 本项目以 **AGPL-3.0-or-later** 发布（与上游 LibreTV 一致），见 [LICENSE](LICENSE)。
 - 上游项目：[LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV)；本项目是面向飞牛 OS 的
