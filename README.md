@@ -277,7 +277,7 @@ MCP 搜索资源、加入影视库、删除 STRM、触发同步与媒体库扫�
 - 工具：`search_videos`、`add_to_library`、`list_library`、`remove_from_library`、
   `sync_library`、`cleanup_orphans`、`get_engine_status`、`refresh_media_library` 等
 
-详见 [docs/MCP.md](docs/MCP.md)。MCP 服务异常不影响 LibreTV 主 Web；FN Connect 中继下
+详见 [MCP 接入操作文档](docs/MCP-SETUP.md) / [工具说明](docs/MCP.md)。MCP 服务异常不影响 LibreTV 主 Web；FN Connect 中继下
 8090/8092 不可达，MCP 请在局域网或公网直连环境使用。
 
 ## 十二、许可证与致谢
