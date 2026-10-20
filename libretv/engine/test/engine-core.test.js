@@ -572,3 +572,100 @@ test('startEngine：重复启动返回同一 handle，stop 后可再次启动', 
   assert.notEqual(third, first);
   third.stop();
 });
+
+test('handleSync：源站新增剧集时自动追更（9 集 → 新增集数自动写 STRM）', async () => {
+  let episodeCount = 2;
+  const { dir, engine, root } = makeEngine(async () => {
+    const eps = Array.from({ length: episodeCount }, (_, i) => `第${i + 1}集$https://cdn.example.com/e${i + 1}.m3u8`).join('#');
+    return jsonResponse({ code: 1, list: [vod('追更剧', '2026', `HD$${eps}`)] });
+  });
+
+  await engine.handleAdd({
+    sourceApiBase: API,
+    vodId: '9001',
+    vodName: '追更剧',
+    vodYear: '2026',
+    type: 'tv',
+  });
+  const seasonDir = path.join(root, '追更剧 (2026)', 'Season 01');
+  assert.equal(fs.readdirSync(seasonDir).filter((n) => n.endsWith('.strm')).length, 2);
+
+  episodeCount = 4;
+  const stats = await engine.handleSync();
+  assert.equal(stats.checked, 1);
+  assert.equal(stats.episodesAdded, 2);
+  assert.equal(stats.updated, 1);
+  const files = fs.readdirSync(seasonDir).filter((n) => n.endsWith('.strm')).sort();
+  assert.equal(files.length, 4);
+  assert.ok(files.some((n) => n.includes('S01E04')));
+  const urls = fs.readFileSync(path.join(seasonDir, files.find((n) => n.includes('S01E04'))), 'utf8');
+  assert.match(urls, /e4\.m3u8/);
+
+  const entry = readJson(path.join(dir, 'strm-index.json')).entries[indexStore.entryKey(API, '9001')];
+  assert.equal(entry.lastKnownUrls.length, 4);
+});
+
+test('handleSync：URL 未变但本地 STRM 被删时自动补齐', async () => {
+  const { dir, engine, root } = makeEngine(async () =>
+    jsonResponse({ code: 1, list: [vod('补齐剧', '2026', '第1集$https://cdn.example.com/1.m3u8#第2集$https://cdn.example.com/2.m3u8')] })
+  );
+  await engine.handleAdd({
+    sourceApiBase: API,
+    vodId: '9002',
+    vodName: '补齐剧',
+    vodYear: '2026',
+    type: 'tv',
+  });
+  const seasonDir = path.join(root, '补齐剧 (2026)', 'Season 01');
+  const removed = fs.readdirSync(seasonDir).find((n) => n.includes('S01E02'));
+  fs.unlinkSync(path.join(seasonDir, removed));
+
+  const stats = await engine.handleSync();
+  assert.equal(stats.filesRestored, 1);
+  assert.equal(fs.readdirSync(seasonDir).filter((n) => n.endsWith('.strm')).length, 2);
+});
+
+test('handleCleanup：资源目录 0 个 STRM（留 nfo/海报）时整目录回收并清索引', async () => {
+  const { dir, engine, root } = makeEngine(async () => jsonResponse({ code: 1, list: [] }));
+  const resourceDir = path.join(root, '空资源 (2026)');
+  const seasonDir = path.join(resourceDir, 'Season 01');
+  fs.mkdirSync(seasonDir, { recursive: true });
+  fs.writeFileSync(path.join(seasonDir, 'tvshow.nfo'), 'metadata\n', 'utf8');
+  fs.writeFileSync(path.join(resourceDir, 'poster.jpg'), Buffer.alloc(8));
+  // 模拟“用户在媒体库删除后只剩空目录”，把 mtime 调老以越过宽限期
+  const old = new Date(Date.now() - 30 * 60 * 1000);
+  fs.utimesSync(seasonDir, old, old);
+  fs.utimesSync(resourceDir, old, old);
+
+  const index = indexStore.createEmptyIndex();
+  indexStore.upsertEntry(index, {
+    type: 'tv',
+    title: '空资源',
+    year: '2026',
+    sourceName: '源',
+    sourceApiBase: API,
+    vodId: 'empty',
+    strmPaths: [path.join(seasonDir, '空资源 - S01E01.strm')],
+    lastKnownUrls: ['https://cdn.example.com/x.m3u8'],
+    lastSyncedAt: new Date().toISOString(),
+    consecutiveFailures: 0,
+    lastError: '',
+  });
+  indexStore.saveIndex(dir, index);
+
+  const stats = await engine.handleCleanup();
+  assert.equal(stats.emptyDirsRemoved, 1);
+  assert.equal(stats.entriesRemoved, 1);
+  assert.equal(fs.existsSync(resourceDir), false);
+  assert.equal(fs.existsSync(root), true);
+  assert.equal(readJson(path.join(dir, 'strm-index.json')).entries[indexStore.entryKey(API, 'empty')], undefined);
+});
+
+test('reclaimEmptyResourceDirs：宽限期内新建空目录不删', async () => {
+  const { engine, root } = makeEngine(async () => jsonResponse({ code: 1, list: [] }));
+  const fresh = path.join(root, '刚建空目录 (2026)');
+  fs.mkdirSync(fresh, { recursive: true });
+  const stats = await engine.reclaimEmptyResourceDirs();
+  assert.equal(stats.emptyDirsRemoved, 0);
+  assert.equal(fs.existsSync(fresh), true);
+});

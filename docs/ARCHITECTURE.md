@@ -307,3 +307,10 @@ engine 处理完成后：
 - 替换：`target/server.new-<ver>` → 校验 → 原子重命名；保留 `server.old-<旧版>`；
 - 重启：`cmd/main stop/start`（`/var/apps/<app>/cmd/main`），健康检查失败自动回滚；
 - 不影响 var/ 配置、STRM、MCP、飞牛影视媒体库。
+
+## 16. 自动追更与空资源目录回收（1.0.9）
+
+- `handleSync`：URL 列表变化 → 重建计划，统计 `episodesAdded`；URL 未变但本地文件缺失 → 补齐 `filesRestored`；
+- `reclaimEmptyResourceDirs`：每 5 分钟扫描 strmdata 第一层目录，0 个 `.strm` 且 mtime 超过宽限（默认 5 分钟）→ 递归删除目录、移除索引条目、刷新影视；
+- 配置：`cleanupEmptyDirs`（默认 true）、`emptyDirGraceMinutes`（默认 5，1–60）；
+- 测试：85 个引擎测试通过（新增追更/补齐/空目录/宽限期 4 个）。

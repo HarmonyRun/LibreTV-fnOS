@@ -32,6 +32,9 @@ const STATE_HEARTBEAT_MS = 30000;
 const DEFAULT_SYNC_DELAY_MS = 200;
 const FAILED_KEEP = 50;
 const DELETE_AFTER_FAILURES = 3;
+/** 空资源目录回收：默认每 5 分钟扫描一次；目录 mtime 超过 5 分钟且 0 个 .strm 才删除，避免与入库任务竞争 */
+const EMPTY_DIR_SCAN_INTERVAL_MS = 5 * 60 * 1000;
+const EMPTY_DIR_GRACE_MS = 5 * 60 * 1000;
 const DEFAULT_FNV_BASE_URL = 'http://127.0.0.1:5666';
 const DEFAULT_FNV_APP_NAME = 'trimemedia-web';
 
@@ -48,7 +51,7 @@ function safeJson(value) {
 }
 
 function emptySyncResult() {
-  return { checked: 0, updated: 0, deleted: 0, orphansDeleted: 0, errors: 0 };
+  return { checked: 0, updated: 0, deleted: 0, orphansDeleted: 0, episodesAdded: 0, filesRestored: 0, errors: 0 };
 }
 
 /** state.engine.lastResult 只保留概要，避免把全部 URL 写进 state.json */
@@ -56,7 +59,7 @@ function summarizeResult(action, result) {
   if (!result || typeof result !== 'object') return result === undefined ? null : result;
   if (action === 'sync') {
     const out = {};
-    for (const key of ['checked', 'updated', 'deleted', 'orphansDeleted', 'errors']) {
+    for (const key of ['checked', 'updated', 'deleted', 'orphansDeleted', 'episodesAdded', 'filesRestored', 'errors']) {
       if (Number.isFinite(result[key])) out[key] = result[key];
     }
     if (result.skipped) out.skipped = true;
@@ -76,7 +79,13 @@ function summarizeResult(action, result) {
     };
   }
   if (action === 'cleanup') {
-    return { orphansDeleted: result.orphansDeleted || 0, dirsRemoved: result.dirsRemoved || 0 };
+    return {
+      orphansDeleted: result.orphansDeleted || 0,
+      dirsRemoved: result.dirsRemoved || 0,
+      emptyDirsRemoved: result.emptyDirsRemoved || 0,
+      emptyDirsFilesRemoved: result.emptyDirsFilesRemoved || 0,
+      entriesRemoved: result.entriesRemoved || 0,
+    };
   }
   return { ok: result.ok !== false };
 }
@@ -187,6 +196,28 @@ function pruneEmptyDirs(root, startDir) {
   return removed;
 }
 
+/** 递归统计目录内文件数；读取失败返回 -1（调用方应跳过删除） */
+function countFilesRecursive(dir) {
+  let count = 0;
+  const stack = [dir];
+  while (stack.length) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      return -1;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) stack.push(full);
+      else count += 1;
+    }
+  }
+  return count;
+}
+
 function sameUrlList(a, b) {
   if (!Array.isArray(a) || !Array.isArray(b)) return false;
   if (a.length !== b.length) return false;
@@ -265,6 +296,7 @@ function createEngine(options = {}) {
   let stopped = false;
   let ticking = false;
   let syncing = false;
+  let nextEmptyScanAt = 0;
   let tickTimer = null;
   let nextSyncAt = 0;
   let syncIntervalMs = 0;
@@ -520,6 +552,13 @@ function createEngine(options = {}) {
       plan.push({ absPath, url: episode.url, relative });
     }
     return plan;
+  }
+
+  function writePlanFiles(plan) {
+    for (const item of plan) {
+      ensureDir(path.dirname(item.absPath));
+      atomicWriteFile(item.absPath, item.url + '\n');
+    }
   }
 
   function refreshDirOf(root, strmPath) {
@@ -1049,10 +1088,9 @@ function createEngine(options = {}) {
             const episodes = selectEpisodes(detail, type);
             const plan = buildPlan({ root, type, title: entry.title, year: entry.year, episodes });
             if (plan.length === 0) throw new Error('生成 STRM 路径失败');
-            for (const item of plan) {
-              ensureDir(path.dirname(item.absPath));
-              atomicWriteFile(item.absPath, item.url + '\n');
-            }
+            const oldSet = new Set((entry.strmPaths || []).map((p) => path.resolve(p)));
+            const added = plan.filter((item) => !oldSet.has(path.resolve(item.absPath))).length;
+            writePlanFiles(plan);
             const newPaths = plan.map((item) => item.absPath);
             removeStalePaths({
               root,
@@ -1074,19 +1112,51 @@ function createEngine(options = {}) {
             changedDirs.push(...plan.map((item) => refreshDirOf(root, item.absPath)));
             mutated = true;
             stats.updated += 1;
-            logger.info(`同步更新条目: ${entry.title || key} urls=${urls.length}`);
+            stats.episodesAdded += added;
+            logger.info(
+              `同步更新条目: ${entry.title || key} urls=${urls.length} 新增文件=${added}${
+                added > 0 ? '（追更）' : ''
+              }`
+            );
           } else {
-            const warnings = detail.chosenLine && detail.chosenLine.noM3u8 ? ['no-m3u8'] : [];
-            const warningsChanged = warnings.length !== (entry.warnings || []).length;
-            if (warningsChanged) {
-              if (warnings.length > 0) entry.warnings = warnings;
-              else delete entry.warnings;
+            // URL 列表没变，但本地 .strm 可能被删/路径名变化：补齐缺失文件，保持追更与手动清理一致
+            const episodes = selectEpisodes(detail, type);
+            const plan = buildPlan({ root, type, title: entry.title, year: entry.year, episodes });
+            const oldPaths = entry.strmPaths || [];
+            const newPaths = plan.map((item) => item.absPath);
+            const newSet = new Set(newPaths.map((p) => path.resolve(p)));
+            const missing = plan.filter((item) => !fs.existsSync(item.absPath));
+            const stale = oldPaths.map((p) => path.resolve(p)).filter((p) => !newSet.has(p));
+            if (plan.length > 0 && (missing.length > 0 || stale.length > 0)) {
+              writePlanFiles(plan);
+              removeStalePaths({ root, index, key, oldPaths, newPaths });
+              entry.strmPaths = newPaths;
+              entry.lastKnownUrls = plan.map((item) => item.url);
+              entry.lastSyncedAt = toIso(now());
+              entry.consecutiveFailures = 0;
+              entry.lastError = '';
+              changedDirs.push(...newPaths.map((p) => refreshDirOf(root, p)));
+              mutated = true;
+              stats.filesRestored += missing.length;
+              if (missing.length > 0) {
+                logger.info(`同步补齐缺失 STRM: ${entry.title || key} 新增 ${missing.length} 个文件`);
+              }
+              if (stale.length > 0) {
+                logger.info(`同步清理失效路径: ${entry.title || key} 移除 ${stale.length} 个旧路径`);
+              }
+            } else {
+              const warnings = detail.chosenLine && detail.chosenLine.noM3u8 ? ['no-m3u8'] : [];
+              const warningsChanged = warnings.length !== (entry.warnings || []).length;
+              if (warningsChanged) {
+                if (warnings.length > 0) entry.warnings = warnings;
+                else delete entry.warnings;
+                mutated = true;
+              }
+              entry.lastSyncedAt = toIso(now());
+              entry.consecutiveFailures = 0;
+              entry.lastError = '';
               mutated = true;
             }
-            entry.lastSyncedAt = toIso(now());
-            entry.consecutiveFailures = 0;
-            entry.lastError = '';
-            mutated = true;
           }
         } else if (detail.ok) {
           // 详情存在但解析不到播放地址：按错误累计，不立即删除
@@ -1184,11 +1254,93 @@ function createEngine(options = {}) {
       stats.dirsRemoved += pruneEmptyDirs(root, dir);
     }
 
-    if (stats.orphansDeleted > 0 || stats.dirsRemoved > 0) {
-      queueRefreshDirs([...affectedDirs]);
-      logger.info(`清理完成: 孤儿 STRM ${stats.orphansDeleted} 个，空目录 ${stats.dirsRemoved} 个`);
+    const emptyStats = await reclaimEmptyResourceDirs();
+    stats.emptyDirsRemoved = emptyStats.emptyDirsRemoved;
+    stats.emptyDirsFilesRemoved = emptyStats.emptyDirsFilesRemoved;
+    stats.entriesRemoved = emptyStats.entriesRemoved;
+
+    if (stats.orphansDeleted > 0 || stats.dirsRemoved > 0 || stats.emptyDirsRemoved > 0) {
+      if (affectedDirs.size > 0) queueRefreshDirs([...affectedDirs]);
+      logger.info(
+        `清理完成: 孤儿 STRM ${stats.orphansDeleted} 个，空目录 ${stats.dirsRemoved} 个，空资源目录 ${stats.emptyDirsRemoved} 个（${stats.emptyDirsFilesRemoved} 个文件 / ${stats.entriesRemoved} 条索引）`
+      );
     } else {
-      logger.info('清理完成: 没有孤儿 STRM');
+      logger.info('清理完成: 没有孤儿 STRM 或空资源目录');
+    }
+    return stats;
+  }
+
+  /**
+   * 空资源目录回收：用户可能在飞牛影视/文件管理里把某部剧的 .strm 全部删掉，
+   * 此时资源目录里 0 个 .strm；超过宽限期后递归删除整个资源目录（含 nfo/海报等），
+   * 并移除索引中引用该目录的条目，最后触发媒体库刷新。
+   */
+  async function reclaimEmptyResourceDirs() {
+    const stats = { emptyDirsRemoved: 0, emptyDirsFilesRemoved: 0, entriesRemoved: 0, dirs: [] };
+    const config = readConfig();
+    if (config.cleanupEmptyDirs === false) return stats;
+    const root = ensureStrmRoot(config);
+    if (!root) return stats;
+    let graceMs = EMPTY_DIR_GRACE_MS;
+    const graceMinutes = Number(config.emptyDirGraceMinutes);
+    if (Number.isFinite(graceMinutes) && graceMinutes > 0) {
+      graceMs = Math.min(60 * 60 * 1000, Math.max(60 * 1000, graceMinutes * 60 * 1000));
+    }
+    let dirents;
+    try {
+      dirents = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      return stats;
+    }
+    const index = loadIndexSafe();
+    let mutatedIndex = false;
+    for (const dirent of dirents) {
+      if (!dirent.isDirectory()) continue;
+      if (dirent.name.startsWith('.')) continue;
+      const dir = path.join(root, dirent.name);
+      if (!isInside(root, dir) || path.resolve(dir) === path.resolve(root)) continue;
+      let st;
+      try {
+        st = fs.statSync(dir);
+      } catch {
+        continue;
+      }
+      if (now() - st.mtimeMs < graceMs) continue;
+      try {
+        fs.readdirSync(dir);
+      } catch {
+        continue;
+      }
+      if (walkStrmFiles(dir).length > 0) continue;
+      const files = countFilesRecursive(dir);
+      if (files < 0) continue;
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch (err) {
+        logger.warn(`回收空资源目录失败 ${dir}: ${err.message}`);
+        continue;
+      }
+      stats.emptyDirsRemoved += 1;
+      stats.emptyDirsFilesRemoved += files;
+      stats.dirs.push(dir);
+      let removedHere = 0;
+      for (const [key, entry] of Object.entries(index.entries)) {
+        const paths = Array.isArray(entry.strmPaths) ? entry.strmPaths : [];
+        if (paths.some((p) => isInside(dir, path.resolve(p)))) {
+          delete index.entries[key];
+          stats.entriesRemoved += 1;
+          removedHere += 1;
+          mutatedIndex = true;
+        }
+      }
+      logger.warn(`回收空资源目录: ${dir}（0 个 .strm，${files} 个文件，${removedHere} 条索引）`);
+    }
+    if (mutatedIndex) saveIndexSafe(index);
+    if (stats.emptyDirsRemoved > 0) {
+      queueRefreshDirs([root]);
+      logger.info(
+        `空目录回收完成: 目录 ${stats.emptyDirsRemoved} 个，文件 ${stats.emptyDirsFilesRemoved} 个，索引 ${stats.entriesRemoved} 条`
+      );
     }
     return stats;
   }
@@ -1267,6 +1419,15 @@ function createEngine(options = {}) {
 
       await processQueueOnce();
 
+      if (root && !syncing && now() >= nextEmptyScanAt) {
+        nextEmptyScanAt = now() + EMPTY_DIR_SCAN_INTERVAL_MS;
+        try {
+          await reclaimEmptyResourceDirs();
+        } catch (err) {
+          logger.warn(`空目录定时回收异常: ${err.message}`);
+        }
+      }
+
       if (root && !syncing && now() >= nextSyncAt) {
         nextSyncAt = now() + syncIntervalMs;
         await syncAll();
@@ -1288,6 +1449,7 @@ function createEngine(options = {}) {
     const root = ensureStrmRoot(config);
     updateFnvFlags(config);
     updateSyncSchedule(config);
+    nextEmptyScanAt = now() + 60 * 1000;
     state.engine.startedAt = toIso(now());
     state.engine.lastTickAt = toIso(now());
     refreshQueuePending();
@@ -1345,6 +1507,7 @@ function createEngine(options = {}) {
     handleRefresh,
     handleSync,
     handleCleanup,
+    reclaimEmptyResourceDirs,
     syncAll,
     refreshDirs,
     flushRefresh,

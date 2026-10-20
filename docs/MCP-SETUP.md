@@ -221,8 +221,8 @@ printf '%s\n' \
 
 ### 7.5 其他维护
 
-- 手动同步：`{"tool":"sync_library","arguments":{"wait":true}}`
-- 清理孤儿：`{"tool":"cleanup_orphans","arguments":{"wait":true}}`
+- 手动同步（追更/补缺）：`{"tool":"sync_library","arguments":{"wait":true}}`
+- 清理孤儿 + 空资源目录：`{"tool":"cleanup_orphans","arguments":{"wait":true}}`
 - 刷新影视库：`{"tool":"refresh_media_library","arguments":{}}`
 
 ---

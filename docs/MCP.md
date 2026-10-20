@@ -91,7 +91,7 @@ node mcp/stdio-bridge.js --url http://<NAS-IP>:8092/mcp --token <MCP_TOKEN>
 | `list_library` | 列出已入库条目 | `query?`、`type?`、`limit?` |
 | `remove_from_library` | **递归删除资源目录**（或按季删除），同步清理索引 + 刷新影视库 | `key`/`title`、`season?`、`all?`、`dryRun?` |
 | `sync_library` | 触发增量同步 | `wait?`、`timeoutSeconds?` |
-| `cleanup_orphans` | 清理孤儿 STRM | `wait?` |
+| `cleanup_orphans` | 清理孤儿 STRM + **回收空资源目录**（0 个 strm 的整目录） | `wait?` |
 | `get_engine_status` | 引擎/索引/同步状态 | — |
 | `refresh_media_library` | 触发飞牛影视扫描 | `dirList?` |
 | `list_sources` | 列出采集源 | — |

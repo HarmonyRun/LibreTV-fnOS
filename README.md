@@ -1,7 +1,7 @@
 # LibreTV 飞牛 OS 原生应用（内置 STRM 自动化引擎）
 
 > **项目仓库**：<https://github.com/HarmonyRun/LibreTV-fnOS>  
-> **安装包下载**：<https://github.com/HarmonyRun/LibreTV-fnOS/releases>（Release 附件 `libretv-1.0.3.fpk`）  
+> **安装包下载**：<https://github.com/HarmonyRun/LibreTV-fnOS/releases>（Release 附件 `libretv-1.0.9.fpk`）  
 > 本项目基于开源项目 [LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV)（AGPL-3.0）二次开发，
 > 上游 fork：<https://github.com/HarmonyRun/LibreTV>。
 
@@ -11,7 +11,8 @@ FPK 应用，并在**同一进程**内内置「全自动 STRM 引擎」：
 - 在 LibreTV 里搜片 → 详情页点「加入媒体库」→ 后台自动生成 `.strm` 文本文件；
 - 飞牛影视把该目录当普通媒体库扫描，**海报墙**立即出现影片；
 - 播放时飞牛影视返回 **302 重定向**，客户端直连源站，**NAS 本地只占 KB 级文本**、几乎不耗流量；
-- 每 6 小时自动增量同步（URL 变化自动覆写、失效条目清理、孤儿文件清扫），并自动调用
+- 自动追更：源站新增剧集时，下次同步自动补写新集 STRM；空资源目录自动回收（1.0.9 新增）；
+- 每 6 小时自动增量同步（URL 变化自动覆写、新增集数自动补齐、失效条目清理、孤儿文件清扫），并自动调用
   飞牛影视 API 触发**定向扫描**（密钥内置，用户只需填媒体账号密码）。
 
 > 已在 fnOS 1.2.0800 / 飞牛影视 0.9.8-1 实机安装并验证：启动、API、STRM 生成（电影 + 46 集剧集）、
@@ -25,7 +26,7 @@ FPK 应用，并在**同一进程**内内置「全自动 STRM 引擎」：
 
 ### 第 1 步：安装应用（并授权目录）
 
-1. 从 [Releases](https://github.com/HarmonyRun/LibreTV-fnOS/releases) 下载 `libretv-1.0.3.fpk`，打开 **应用中心 → 手动安装** 选择该文件；
+1. 从 [Releases](https://github.com/HarmonyRun/LibreTV-fnOS/releases) 下载 `libretv-1.0.9.fpk`，打开 **应用中心 → 手动安装** 选择该文件；
 2. 安装位置选择 **/vol2**（与 STRM 目录同一存储空间）；
 3. 安装向导填写：
    - **STRM 文件根目录**：默认 `/vol2/1000/liberTV/strmdata`（建议保留）。
@@ -79,7 +80,8 @@ STRM 生成后，引擎会调用飞牛影视 API 对**发生变化的目录**做
 |---|---|
 | 点「加入媒体库」 | 立即 `202 Accepted`；后台：拉 CMS 详情 → 解析 m3u8 → 写 STRM → 更新索引 → 触发影视扫描 |
 | 启动时 | 检查 STRM 根目录；从 `var/strm-index.json` 恢复索引；不扫描全站 |
-| 每 6 小时 | 遍历索引重新拉详情：URL 变化 → 覆写；CMS 明确条目不存在**连续 3 次** → 删除；随后快扫清理孤儿 `.strm` 与空目录 |
+| 每 6 小时（可调 1–168h） | 遍历索引重新拉详情：URL 变化/新增集数 → 重建补写；本地 `.strm` 缺失 → 自动补齐；CMS 明确不存在**连续 3 次** → 删除；随后快扫清理孤儿 `.strm` 与空目录 |
+| 每 5 分钟 | 空资源目录回收：第一层资源目录 0 个 `.strm` 且超过 5 分钟宽限 → 整个目录（含 nfo/海报）删除并清理索引 |
 | 每次变更 | 变更的剧名目录去重后调用影视 `mdb/scan` 定向扫描（`-14` 任务冲突自动停任务重试） |
 | 手动 | 设置页提供「立即同步 / 立即清理 / 刷新状态」 |
 
@@ -108,7 +110,7 @@ STRM 生成后，引擎会调用飞牛影视 API 对**发生变化的目录**做
 
 | 项目 | 结果 |
 |---|---|
-| `fnpack build` | ✅ 零错误，`dist/libretv-1.0.3.fpk` |
+| `fnpack build` | ✅ 零错误，`dist/libretv-1.0.9.fpk` |
 | 安装到 /vol2、启动、`/api/auth` 200 | ✅ |
 | 引擎单测 / Web 单测 / lint / tsc | ✅ 81 / 440 / 0 / 0 |
 | 电影「加入媒体库」→ STRM 落盘 | ✅《沙丘 (2020)》 |
@@ -181,7 +183,7 @@ cat > /tmp/libretv-install.env <<'EOF'
 wizard_strm_root=/vol2/1000/liberTV/strmdata
 wizard_password=libretv
 EOF
-scp dist/libretv-1.0.3.fpk /tmp/libretv-install.env <nas>:/tmp/libretv-deploy/
+scp dist/libretv-1.0.9.fpk /tmp/libretv-install.env <nas>:/tmp/libretv-deploy/
 ssh <nas> 'sudo -n appcenter-cli install-fpk /tmp/libretv-deploy/libretv-1.0.1.fpk -v 2 -e /tmp/libretv-deploy/libretv-install.env'
 ssh <nas> 'sudo -n appcenter-cli start libretv'
 curl http://<nas>:8090/api/auth
@@ -280,7 +282,41 @@ MCP 搜索资源、加入影视库、删除 STRM、触发同步与媒体库扫�
 详见 [MCP 接入操作文档](docs/MCP-SETUP.md) / [工具说明](docs/MCP.md)。MCP 服务异常不影响 LibreTV 主 Web；FN Connect 中继下
 8090/8092 不可达，MCP 请在局域网或公网直连环境使用。
 
-## 十二、许可证与致谢
+## 十二、OTA 自动更新（1.0.7 新增）
+
+- 启动后 15 秒 + 每 6 小时检查 GitHub Releases；有新版时顶部出现「更新 vX」按钮；
+- 点击后自动下载 `libretv-update-<ver>.tar.gz`、用 release digest 做 sha256 校验、原子替换运行文件并自动重启；
+- 失败自动回滚；配置 / STRM 索引 / 媒体库数据保留；
+- 1.0.3 及更早版本需手动安装一次 1.0.9 FPK，之后即可页面内一键更新；
+- 飞牛应用中心显示的是「安装 FPK 的版本」，OTA 后应用内版本更新但应用中心不变，属正常现象；
+- 详见 [docs/UPDATE.md](docs/UPDATE.md)。
+
+## 十三、自动追更与空目录回收（1.0.9 新增）
+
+### 自动追更
+
+- 每次增量同步（默认 6 小时，可在设置中设为 1–168 小时）都会重新拉取已入库条目的详情；
+- 如果源站新增剧集（如 9 集 → 30 集），自动在对应 `Season NN` 目录补写新增集的 `.strm`，并触发影视扫描；
+- 如果本地 `.strm` 被误删但源站 URL 未变，同步时自动补齐缺失文件；
+- 同步结果会记录 `episodesAdded` / `filesRestored`，可在引擎日志中查看。
+
+> 想更快追更，把「同步间隔」改为 1–2 小时即可；采集源请求量随条目数线性增加。
+
+### 空资源目录回收
+
+- 每 5 分钟扫描 `strmdata` 第一层资源目录；
+- 若某目录内 **0 个 `.strm`**（例如你在飞牛影视/文件管理里把整部剧删掉了）且目录 mtime 超过 **5 分钟宽限**：
+  - 递归删除整个资源目录（含 nfo、海报、字幕等所有文件）；
+  - 移除 `strm-index.json` 中引用该目录的条目；
+  - 触发飞牛影视扫描，海报墙同步消失；
+- 宽限期用于避免与「加入媒体库」任务竞争；只处理 `strmdata` 第一层目录，不会删除 `strmdata` 根目录；
+- 可配置（`var/config.json`）：
+  - `"cleanupEmptyDirs": false` 关闭空目录回收；
+  - `"emptyDirGraceMinutes": 10` 调整宽限分钟数（1–60）。
+
+> 只删除部分集数不会触发整目录回收：下次同步会自动补齐缺失集；只有整个资源目录一个 `.strm` 都不剩时才会回收。
+
+## 十四、许可证与致谢
 
 - 本项目以 **AGPL-3.0-or-later** 发布（与上游 LibreTV 一致），见 [LICENSE](LICENSE)。
 - 上游项目：[LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV)；本项目是面向飞牛 OS 的

@@ -180,3 +180,14 @@
   - 新增《流浪地球2》→ 文件夹生成；`remove_from_library` 按标题删除 → 整个 `流浪地球2 (2023)` 目录消失；
   - 索引回到 4 条、STRM 90 个，`list_library` 正常；
 - 安全：目标必须在 STRM 根目录内且非根目录；`all=false` 多目录需确认；`dryRun` 可预览。
+
+## 13. 自动追更与空资源目录回收验证（1.0.9）
+
+- 追更：引擎测试模拟 2 集 → 4 集，`handleSync` 自动补写 S01E03/E04，`episodesAdded=2`；
+- 补齐：URL 未变但删除一个本地 STRM，`handleSync` 自动重写，`filesRestored=1`；
+- 空目录：资源目录 0 个 `.strm`（仅 nfo/海报）+ mtime 超过宽限 → 整目录递归删除、索引条目移除、根目录保留；
+- 宽限期：新建空目录 5 分钟内不删（测试通过）；
+- NAS 实测（1.0.9）：
+  - 手动创建 `_回收测试 (2026)/Season 01/tvshow.nfo` 并 backdate，`cleanup_orphans` 返回 `emptyDirsRemoved=1, emptyDirsFilesRemoved=2`，目录消失；
+  - 真实数据中 `嫁金钗` 由 9 个 STRM 同步为 10 个（追更生效，日志“同步更新条目 urls=10”）；
+- 配置：`cleanupEmptyDirs`、`emptyDirGraceMinutes`；同步间隔设置 1–168h。
