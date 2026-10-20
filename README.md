@@ -21,6 +21,21 @@ FPK 应用，并在**同一进程**内内置「全自动 STRM 引擎」：
 > 详细证据见 [docs/FINAL-VERIFY.md](docs/FINAL-VERIFY.md)。
 > **部署与使用指南（含各步骤截图）**：[Markdown](docs/DEPLOY-GUIDE.md) · [Word](docs/LibreTV-fnOS-部署与使用指南-v1.0.9.docx) · [PDF](docs/LibreTV-fnOS-部署与使用指南-v1.0.9.pdf)
 
+## 📖 图文操作指南（含 19 张实机截图）
+
+| 格式 | 链接 | 说明 |
+|---|---|---|
+| 在线阅读 | [docs/DEPLOY-GUIDE.md](docs/DEPLOY-GUIDE.md) | 13 个章节，GitHub 直接渲染图片 |
+| PDF | [LibreTV-fnOS-部署与使用指南-v1.0.9.pdf](docs/LibreTV-fnOS-部署与使用指南-v1.0.9.pdf) | 28 页 A4，适合打印/分享 |
+| Word | [LibreTV-fnOS-部署与使用指南-v1.0.9.docx](docs/LibreTV-fnOS-部署与使用指南-v1.0.9.docx) | 可编辑版本 |
+| 截图目录 | [docs/images/deploy-guide](docs/images/deploy-guide) | 19 张原图 |
+
+内容覆盖：fnOS 应用中心安装 → 授权目录 → LibreTV 登录/媒体库配置 → 飞牛影视添加媒体库 →
+搜索并加入媒体库 → LAN/公网/中继播放 → 自动追更与空目录回收 → OTA 更新 → MCP 接入 → 排障。
+
+> 截图来自真实运行环境；MCP Token、媒体账号已脱敏，示例 IP `192.168.3.83` 请替换为你的 NAS 地址。
+
+
 ---
 
 ## 一、三步配置（用户侧）
