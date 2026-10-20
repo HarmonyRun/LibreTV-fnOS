@@ -19,6 +19,7 @@ FPK 应用，并在**同一进程**内内置「全自动 STRM 引擎」：
 > 增量同步、孤儿清理、重启保留、影视自动识别、**应用内影视兼容代理播放**均通过。
 > 说明：影视 0.9.8 原生不支持 HLS 的 STRM 直连，1.0.2 起通过应用内「影视库」代理播放解决（见第九节）。
 > 详细证据见 [docs/FINAL-VERIFY.md](docs/FINAL-VERIFY.md)。
+> **部署与使用指南（含各步骤截图）**：[Markdown](docs/DEPLOY-GUIDE.md) · [Word](docs/LibreTV-fnOS-部署与使用指南-v1.0.9.docx) · [PDF](docs/LibreTV-fnOS-部署与使用指南-v1.0.9.pdf)
 
 ---
 
