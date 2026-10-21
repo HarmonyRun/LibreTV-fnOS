@@ -191,3 +191,11 @@
   - 手动创建 `_回收测试 (2026)/Season 01/tvshow.nfo` 并 backdate，`cleanup_orphans` 返回 `emptyDirsRemoved=1, emptyDirsFilesRemoved=2`，目录消失；
   - 真实数据中 `嫁金钗` 由 9 个 STRM 同步为 10 个（追更生效，日志“同步更新条目 urls=10”）；
 - 配置：`cleanupEmptyDirs`、`emptyDirGraceMinutes`；同步间隔设置 1–168h。
+
+## 14. 自愈看护验证（1.0.10）
+
+- `start.js` 启动后派生 `watchdog.js` 看护进程（detached），写入 `watchdog.pid`；
+- 实测强杀 Node（`kill -9 <app.pid>`）：1 秒内看护拉起新进程，`app.pid` 更新，8090/8091/8092 恢复；
+- 应用中心停止：8 秒后无进程/端口，确认看护不会复活应用；再次启动正常；
+- 日志：`var/watchdog.log` 记录“父进程已退出，接管并重启应用”、子进程 PID；
+- 该机制在 `server/` 载荷内，可随 OTA 更新。

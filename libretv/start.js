@@ -13,6 +13,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const { spawn } = require('child_process');
 
 // ---- 数据目录 ----------------------------------------------------------------
 const dataDir =
@@ -52,6 +53,103 @@ function safeJson(value) {
     return String(value);
   }
 }
+
+// ---- 自愈看护（watchdog） ----------------------------------------------------
+const WATCHDOG_SCRIPT = path.join(__dirname, 'watchdog.js');
+const WATCHDOG_PID_FILE = path.join(dataDir, 'watchdog.pid');
+const WATCHDOG_STOP_FILE = path.join(dataDir, 'watchdog.stop');
+let watchdogPid = null;
+
+function readPidFile(file) {
+  try {
+    const n = Number(fs.readFileSync(file, 'utf8').trim());
+    return Number.isInteger(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function isWatchdogProcess(pid) {
+  if (!pid) return false;
+  try {
+    const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+    return cmdline.includes('watchdog.js');
+  } catch {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function stopWatchdog() {
+  try {
+    fs.writeFileSync(WATCHDOG_STOP_FILE, String(Date.now()), 'utf8');
+  } catch {
+    /* ignore */
+  }
+  const pid = watchdogPid || readPidFile(WATCHDOG_PID_FILE);
+  if (pid && pid !== process.pid && isWatchdogProcess(pid)) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      /* ignore */
+    }
+  }
+  try {
+    fs.rmSync(WATCHDOG_PID_FILE, { force: true });
+  } catch {
+    /* ignore */
+  }
+}
+
+function startWatchdog() {
+  if (process.env.LIBRETV_GUARDED === '1') {
+    log('info', '运行在看护模式（LIBRETV_GUARDED=1），不再启动额外看护进程');
+    return;
+  }
+  if (!fs.existsSync(WATCHDOG_SCRIPT)) {
+    log('warn', `未找到 ${WATCHDOG_SCRIPT}，自愈功能不可用`);
+    return;
+  }
+  // 清理上次异常停留下仍存活的老看护进程
+  const stale = readPidFile(WATCHDOG_PID_FILE);
+  if (stale && stale !== process.pid && isWatchdogProcess(stale)) {
+    try {
+      process.kill(stale, 'SIGTERM');
+      log('warn', `已清理遗留看护进程 pid=${stale}`);
+    } catch {
+      /* ignore */
+    }
+  }
+  try {
+    fs.rmSync(WATCHDOG_STOP_FILE, { force: true });
+  } catch {
+    /* ignore */
+  }
+  try {
+    const out = fs.openSync(path.join(dataDir, 'watchdog.log'), 'a');
+    const child = spawn(
+      process.execPath,
+      [WATCHDOG_SCRIPT, '--parent', String(process.pid), '--entry', __filename, '--cwd', __dirname, '--data', dataDir, '--port', port],
+      {
+        detached: true,
+        stdio: ['ignore', out, out],
+        env: { ...process.env, LIBRETV_WATCHDOG: '1' },
+      }
+    );
+    child.unref();
+    watchdogPid = child.pid;
+    fs.writeFileSync(WATCHDOG_PID_FILE, String(child.pid), 'utf8');
+    log('info', `已启动自愈看护进程 pid=${child.pid}（异常退出将自动重启）`);
+  } catch (err) {
+    log('warn', `自愈看护启动失败（不影响主进程）: ${err && err.message}`);
+  }
+}
+
+startWatchdog();
 
 // ---- 启动 STRM 引擎（失败不阻塞 Web） ---------------------------------------
 let engineHandle = null;
@@ -157,6 +255,7 @@ function shutdown(signal) {
   if (stopping) return;
   stopping = true;
   log('info', `收到 ${signal}，正在退出`);
+  stopWatchdog();
   try {
     if (engineHandle && typeof engineHandle.stop === 'function') engineHandle.stop();
     if (mediaProxyHandle && typeof mediaProxyHandle.stop === 'function') mediaProxyHandle.stop();
@@ -173,6 +272,8 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 process.on('uncaughtException', (err) => {
   log('error', `uncaughtException: ${err && err.stack ? err.stack : err}`);
+  // 交给看护进程重启；若没有看护进程则保持旧行为之外的快速失败（新版 FPK 均带 watchdog.js）
+  setTimeout(() => process.exit(1), 100).unref();
 });
 process.on('unhandledRejection', (err) => {
   log('error', `unhandledRejection: ${err && err.stack ? err.stack : err}`);

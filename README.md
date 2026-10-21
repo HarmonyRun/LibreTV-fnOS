@@ -1,7 +1,7 @@
 # LibreTV 飞牛 OS 原生应用（内置 STRM 自动化引擎）
 
 > **项目仓库**：<https://github.com/HarmonyRun/LibreTV-fnOS>  
-> **安装包下载**：<https://github.com/HarmonyRun/LibreTV-fnOS/releases>（Release 附件 `libretv-1.0.9.fpk`）  
+> **安装包下载**：<https://github.com/HarmonyRun/LibreTV-fnOS/releases>（Release 附件 `libretv-1.0.10.fpk`）  
 > 本项目基于开源项目 [LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV)（AGPL-3.0）二次开发，
 > 上游 fork：<https://github.com/HarmonyRun/LibreTV>。
 
@@ -12,6 +12,7 @@ FPK 应用，并在**同一进程**内内置「全自动 STRM 引擎」：
 - 飞牛影视把该目录当普通媒体库扫描，**海报墙**立即出现影片；
 - 播放时飞牛影视返回 **302 重定向**，客户端直连源站，**NAS 本地只占 KB 级文本**、几乎不耗流量；
 - 自动追更：源站新增剧集时，下次同步自动补写新集 STRM；空资源目录自动回收（1.0.9 新增）；
+- 自愈看护：应用异常退出（崩溃/OOM）后 watchdog 自动重启，正常停止不复活（1.0.10 新增）；
 - 每 6 小时自动增量同步（URL 变化自动覆写、新增集数自动补齐、失效条目清理、孤儿文件清扫），并自动调用
   飞牛影视 API 触发**定向扫描**（密钥内置，用户只需填媒体账号密码）。
 
@@ -33,7 +34,7 @@ FPK 应用，并在**同一进程**内内置「全自动 STRM 引擎」：
 内容覆盖：fnOS 应用中心安装 → 授权目录 → LibreTV 登录/媒体库配置 → 飞牛影视添加媒体库 →
 搜索并加入媒体库 → LAN/公网/中继播放 → 自动追更与空目录回收 → OTA 更新 → MCP 接入 → 排障。
 
-> 截图来自真实运行环境；MCP Token、媒体账号已脱敏，示例 IP `192.168.3.83` 请替换为你的 NAS 地址。
+> 截图来自真实运行环境；MCP Token、媒体账号已脱敏，示例 IP `192.168.1.100` 请替换为你的 NAS 地址。
 
 
 ---
@@ -42,7 +43,7 @@ FPK 应用，并在**同一进程**内内置「全自动 STRM 引擎」：
 
 ### 第 1 步：安装应用（并授权目录）
 
-1. 从 [Releases](https://github.com/HarmonyRun/LibreTV-fnOS/releases) 下载 `libretv-1.0.9.fpk`，打开 **应用中心 → 手动安装** 选择该文件；
+1. 从 [Releases](https://github.com/HarmonyRun/LibreTV-fnOS/releases) 下载 `libretv-1.0.10.fpk`，打开 **应用中心 → 手动安装** 选择该文件；
 2. 安装位置选择 **/vol2**（与 STRM 目录同一存储空间）；
 3. 安装向导填写：
    - **STRM 文件根目录**：默认 `/vol2/1000/liberTV/strmdata`（建议保留）。
@@ -126,7 +127,7 @@ STRM 生成后，引擎会调用飞牛影视 API 对**发生变化的目录**做
 
 | 项目 | 结果 |
 |---|---|
-| `fnpack build` | ✅ 零错误，`dist/libretv-1.0.9.fpk` |
+| `fnpack build` | ✅ 零错误，`dist/libretv-1.0.10.fpk` |
 | 安装到 /vol2、启动、`/api/auth` 200 | ✅ |
 | 引擎单测 / Web 单测 / lint / tsc | ✅ 81 / 440 / 0 / 0 |
 | 电影「加入媒体库」→ STRM 落盘 | ✅《沙丘 (2020)》 |
@@ -199,7 +200,7 @@ cat > /tmp/libretv-install.env <<'EOF'
 wizard_strm_root=/vol2/1000/liberTV/strmdata
 wizard_password=libretv
 EOF
-scp dist/libretv-1.0.9.fpk /tmp/libretv-install.env <nas>:/tmp/libretv-deploy/
+scp dist/libretv-1.0.10.fpk /tmp/libretv-install.env <nas>:/tmp/libretv-deploy/
 ssh <nas> 'sudo -n appcenter-cli install-fpk /tmp/libretv-deploy/libretv-1.0.1.fpk -v 2 -e /tmp/libretv-deploy/libretv-install.env'
 ssh <nas> 'sudo -n appcenter-cli start libretv'
 curl http://<nas>:8090/api/auth
@@ -332,7 +333,18 @@ MCP 搜索资源、加入影视库、删除 STRM、触发同步与媒体库扫�
 
 > 只删除部分集数不会触发整目录回收：下次同步会自动补齐缺失集；只有整个资源目录一个 `.strm` 都不剩时才会回收。
 
-## 十四、许可证与致谢
+## 十四、自愈看护（1.0.10 新增）
+
+- 应用启动时由 `start.js` 派生一个脱离的 `watchdog.js` 看护进程；
+- Node 进程异常退出（崩溃、被 OOM kill、被 `kill -9`）后自动重新拉起，端口恢复；
+- 正常停止（应用中心停止、OTA 重启）时看护进程随 stop 标记退出，不会把应用“复活”；
+- 重启退避：5s → 10s → 20s → 60s，稳定运行 5 分钟后重置；
+- 日志：`/vol2/@appdata/libretv/watchdog.log`（重启原因、退出码、信号、运行时长）；
+- 看护逻辑在 `server/` 运行载荷内，可随 OTA 自动更新，无需改动应用中心生命周期脚本。
+
+> 实测：`kill -9` Node 后 1 秒内自动恢复 8090/8091/8092；应用中心停止后确认无进程复活。
+
+## 十五、许可证与致谢
 
 - 本项目以 **AGPL-3.0-or-later** 发布（与上游 LibreTV 一致），见 [LICENSE](LICENSE)。
 - 上游项目：[LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV)；本项目是面向飞牛 OS 的

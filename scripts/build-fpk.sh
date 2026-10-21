@@ -133,6 +133,11 @@ cp -R "$LIBRETV_DIR/public" "$APP_SERVER/public"
 
 info "复制 start.js 与 package.json"
 cp "$LIBRETV_DIR/start.js" "$APP_SERVER/start.js"
+if [ -f "$LIBRETV_DIR/watchdog.js" ]; then
+    cp "$LIBRETV_DIR/watchdog.js" "$APP_SERVER/watchdog.js"
+else
+    warn "缺少 libretv/watchdog.js：自愈看护不可用"
+fi
 cp "$LIBRETV_DIR/package.json" "$APP_SERVER/package.json"
 
 if [ -f "$LIBRETV_DIR/engine/index.js" ]; then

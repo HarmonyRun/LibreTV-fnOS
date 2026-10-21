@@ -314,3 +314,11 @@ engine 处理完成后：
 - `reclaimEmptyResourceDirs`：每 5 分钟扫描 strmdata 第一层目录，0 个 `.strm` 且 mtime 超过宽限（默认 5 分钟）→ 递归删除目录、移除索引条目、刷新影视；
 - 配置：`cleanupEmptyDirs`（默认 true）、`emptyDirGraceMinutes`（默认 5，1–60）；
 - 测试：85 个引擎测试通过（新增追更/补齐/空目录/宽限期 4 个）。
+
+## 17. 自愈看护（1.0.10）
+
+- `start.js` 启动时以 detached 方式派生 `watchdog.js`，`watchdog.pid` 记录看护 PID；
+- 看护监视父进程；父进程异常退出后以 `LIBRETV_GUARDED=1` 重启 `start.js`，避免二次派生看护；
+- 正常停止：`start.js` SIGTERM → 写 `watchdog.stop` 并终止看护，看护退出；
+- 重启退避 5s→10s→20s→60s，稳定 5 分钟重置；子进程 stdout/stderr 继续写 `app.log`；
+- 看护代码在 `server/` 载荷内，可通过 OTA 更新，无需改 `cmd/main`。
