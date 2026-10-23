@@ -1,7 +1,7 @@
 # LibreTV 飞牛 OS 原生应用（内置 STRM 自动化引擎）
 
 > **项目仓库**：<https://github.com/HarmonyRun/LibreTV-fnOS>  
-> **安装包下载**：<https://github.com/HarmonyRun/LibreTV-fnOS/releases>（Release 附件 `libretv-1.0.10.fpk`）  
+> **安装包下载**：<https://github.com/HarmonyRun/LibreTV-fnOS/releases>（Release 附件 `libretv-1.0.11.fpk`）  
 > 本项目基于开源项目 [LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV)（AGPL-3.0）二次开发，
 > 上游 fork：<https://github.com/HarmonyRun/LibreTV>。
 
@@ -13,6 +13,7 @@ FPK 应用，并在**同一进程**内内置「全自动 STRM 引擎」：
 - 播放时飞牛影视返回 **302 重定向**，客户端直连源站，**NAS 本地只占 KB 级文本**、几乎不耗流量；
 - 自动追更：源站新增剧集时，下次同步自动补写新集 STRM；空资源目录自动回收（1.0.9 新增）；
 - 自愈看护：应用异常退出（崩溃/OOM）后 watchdog 自动重启，正常停止不复活（1.0.10 新增）；
+- 应用商店送审准备：8091 复用 LibreTV 登录会话鉴权 + 商店版默认关闭 OTA（1.0.11）；
 - 每 6 小时自动增量同步（URL 变化自动覆写、新增集数自动补齐、失效条目清理、孤儿文件清扫），并自动调用
   飞牛影视 API 触发**定向扫描**（密钥内置，用户只需填媒体账号密码）。
 
@@ -22,6 +23,7 @@ FPK 应用，并在**同一进程**内内置「全自动 STRM 引擎」：
 > 详细证据见 [docs/FINAL-VERIFY.md](docs/FINAL-VERIFY.md)。
 > **部署与使用指南（含各步骤截图）**：[Markdown](docs/DEPLOY-GUIDE.md) · [Word](docs/LibreTV-fnOS-部署与使用指南-v1.0.9.docx) · [PDF](docs/LibreTV-fnOS-部署与使用指南-v1.0.9.pdf)
 > **应用商店上架研究与提交清单**：[docs/APP-STORE-SUBMISSION.md](docs/APP-STORE-SUBMISSION.md)
+> **隐私说明**：[docs/PRIVACY.md](docs/PRIVACY.md)
 
 ## 📖 图文操作指南（含 19 张实机截图）
 
@@ -35,7 +37,7 @@ FPK 应用，并在**同一进程**内内置「全自动 STRM 引擎」：
 内容覆盖：fnOS 应用中心安装 → 授权目录 → LibreTV 登录/媒体库配置 → 飞牛影视添加媒体库 →
 搜索并加入媒体库 → LAN/公网/中继播放 → 自动追更与空目录回收 → OTA 更新 → MCP 接入 → 排障。
 
-> 截图来自真实运行环境；MCP Token、媒体账号已脱敏，示例 IP `192.168.1.100` 请替换为你的 NAS 地址。
+> 截图来自真实运行环境；MCP Token、媒体账号已脱敏，示例 IP `192.168.3.83` 请替换为你的 NAS 地址。
 
 
 ---
@@ -44,7 +46,7 @@ FPK 应用，并在**同一进程**内内置「全自动 STRM 引擎」：
 
 ### 第 1 步：安装应用（并授权目录）
 
-1. 从 [Releases](https://github.com/HarmonyRun/LibreTV-fnOS/releases) 下载 `libretv-1.0.10.fpk`，打开 **应用中心 → 手动安装** 选择该文件；
+1. 从 [Releases](https://github.com/HarmonyRun/LibreTV-fnOS/releases) 下载 `libretv-1.0.11.fpk`，打开 **应用中心 → 手动安装** 选择该文件；
 2. 安装位置选择 **/vol2**（与 STRM 目录同一存储空间）；
 3. 安装向导填写：
    - **STRM 文件根目录**：默认 `/vol2/1000/liberTV/strmdata`（建议保留）。
@@ -128,7 +130,7 @@ STRM 生成后，引擎会调用飞牛影视 API 对**发生变化的目录**做
 
 | 项目 | 结果 |
 |---|---|
-| `fnpack build` | ✅ 零错误，`dist/libretv-1.0.10.fpk` |
+| `fnpack build` | ✅ 零错误，`dist/libretv-1.0.11.fpk` |
 | 安装到 /vol2、启动、`/api/auth` 200 | ✅ |
 | 引擎单测 / Web 单测 / lint / tsc | ✅ 81 / 440 / 0 / 0 |
 | 电影「加入媒体库」→ STRM 落盘 | ✅《沙丘 (2020)》 |
@@ -201,7 +203,7 @@ cat > /tmp/libretv-install.env <<'EOF'
 wizard_strm_root=/vol2/1000/liberTV/strmdata
 wizard_password=libretv
 EOF
-scp dist/libretv-1.0.10.fpk /tmp/libretv-install.env <nas>:/tmp/libretv-deploy/
+scp dist/libretv-1.0.11.fpk /tmp/libretv-install.env <nas>:/tmp/libretv-deploy/
 ssh <nas> 'sudo -n appcenter-cli install-fpk /tmp/libretv-deploy/libretv-1.0.1.fpk -v 2 -e /tmp/libretv-deploy/libretv-install.env'
 ssh <nas> 'sudo -n appcenter-cli start libretv'
 curl http://<nas>:8090/api/auth
@@ -247,6 +249,7 @@ MediaWarp/fntv-proxy 这类代理；本应用把该能力内置，避免额外�
 **使用方式（全部在应用内完成）**
 
 1. 打开 LibreTV（8090）→ 顶部导航 **「影视库」**（或直接访问 `http://<NAS-IP>:8091/`）；
+   > 1.0.11 起 8091 复用 LibreTV 的登录会话：需先在 8090 登录，未登录访问 8091 会跳回登录页。
 2. 首次进入按提示登录一次（用你的飞牛影视账号；之后浏览器会记住）；
 3. 进入影视 → 点开《沙丘》/《庆余年》→ 播放。
 
@@ -345,7 +348,16 @@ MCP 搜索资源、加入影视库、删除 STRM、触发同步与媒体库扫�
 
 > 实测：`kill -9` Node 后 1 秒内自动恢复 8090/8091/8092；应用中心停止后确认无进程复活。
 
-## 十五、许可证与致谢
+## 十五、应用商店送审（1.0.11）
+
+- 上架入口：飞牛先锋开发者应用上架申请（飞书表单）；
+- 送审包：`dist/app-store-submission/libretv-1.0.11-store.fpk`（`edition=store`，默认关闭应用内 OTA）；
+- 改造内容：8091 复用 LibreTV `ltv_session` 会话鉴权；manifest 补维护者/发布者/主页/changelog；补隐私说明与 5 张送审截图；
+- 表单要求：非 root、3 段版本号、名称不以“飞牛”开头、端口有鉴权、路径防穿越、真实截图；
+- 审核通过后先进入内测组，内测满一周后开放公测；
+- 详细清单：[docs/APP-STORE-SUBMISSION.md](docs/APP-STORE-SUBMISSION.md)。
+
+## 十六、许可证与致谢
 
 - 本项目以 **AGPL-3.0-or-later** 发布（与上游 LibreTV 一致），见 [LICENSE](LICENSE)。
 - 上游项目：[LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV)；本项目是面向飞牛 OS 的
