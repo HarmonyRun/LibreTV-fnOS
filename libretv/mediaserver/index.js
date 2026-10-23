@@ -29,6 +29,54 @@ const TOKEN_SALT = 'libretv-media-proxy-v1';
 const MAX_JSON_BODY = 2 * 1024 * 1024;
 const MAX_M3U8 = 8 * 1024 * 1024;
 const CACHE_MS = 3000;
+const SESSION_COOKIE = 'ltv_session';
+
+/**
+ * 复用 LibreTV 的 ltv_session 签名会话（cookie 不区分端口，8090 登录后 8091 可直接校验），
+ * 满足应用商店“监听端口必须有自己的鉴权机制，不可免鉴权访问”的要求。
+ * 关闭方式：config.json -> mediaProxy.requireAuth = false（仅调试用）。
+ */
+function sessionSecret() {
+  if (process.env.PROXY_SECRET) return process.env.PROXY_SECRET;
+  const pwd = process.env.PASSWORD || '';
+  return crypto.createHash('sha256').update(`${pwd}:libretv::session-salt`).digest('hex');
+}
+
+function verifySessionToken(token) {
+  if (typeof token !== 'string' || !token) return false;
+  const dot = token.lastIndexOf('.');
+  if (dot <= 0) return false;
+  const payload = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = crypto.createHmac('sha256', sessionSecret()).update(payload).digest('hex');
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+  const expiresAt = parseInt(payload, 10);
+  return Number.isFinite(expiresAt) && Date.now() < expiresAt;
+}
+
+function parseCookies(header) {
+  const out = {};
+  for (const part of String(header || '').split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    const name = part.slice(0, eq).trim();
+    const value = part.slice(eq + 1).trim();
+    try {
+      out[name] = decodeURIComponent(value);
+    } catch {
+      out[name] = value;
+    }
+  }
+  return out;
+}
+
+function hasLibreTvSession(req) {
+  const cookies = parseCookies(req.headers && req.headers.cookie);
+  return verifySessionToken(cookies[SESSION_COOKIE]);
+}
+
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 
@@ -179,6 +227,34 @@ function createMediaProxy({ dataDir, logger, port = DEFAULT_PORT } = {}) {
     }
     indexCache = { at: now, value: entries };
     return entries;
+  }
+
+  function authRequired() {
+    const cfg = getConfig();
+    const mp = cfg.mediaProxy && typeof cfg.mediaProxy === 'object' ? cfg.mediaProxy : {};
+    return mp.requireAuth !== false;
+  }
+
+  function rejectUnauthorized(req, res, pathname) {
+    // 健康检查保持公开；浏览器导航跳转到 LibreTV 登录页，API/HLS 请求返回 401
+    if (pathname === '/__strm/health' || pathname === '/health') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('ok');
+      return true;
+    }
+    if (!hasLibreTvSession(req)) {
+      const accept = String(req.headers.accept || '');
+      const host = String(req.headers.host || '').replace(/:\d+$/, '');
+      if (req.method === 'GET' && accept.includes('text/html')) {
+        res.writeHead(302, { Location: `http://${host}:8090/` });
+        res.end();
+      } else {
+        res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('401 Unauthorized: 请先在 LibreTV(8090) 登录');
+      }
+      return true;
+    }
+    return false;
   }
 
   function getSecret() {
@@ -666,6 +742,7 @@ function createMediaProxy({ dataDir, logger, port = DEFAULT_PORT } = {}) {
       pathname = '/';
     }
     try {
+      if (authRequired() && rejectUnauthorized(req, res, pathname)) return;
       if (pathname.startsWith('/__strm/')) {
         handleRelay(req, res, pathname);
         return;
@@ -694,6 +771,11 @@ function createMediaProxy({ dataDir, logger, port = DEFAULT_PORT } = {}) {
   // WebSocket 透传（影视 Web 可能使用）
   server.on('upgrade', (req, socket, head) => {
     try {
+      if (authRequired() && !hasLibreTvSession(req)) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
       const upSocket = require('net').connect(BACKEND_PORT, BACKEND_HOST, () => {
         const headers = Object.entries(req.headers)
           .map(([k, v]) => `${k}: ${v}`)
@@ -718,7 +800,7 @@ function createMediaProxy({ dataDir, logger, port = DEFAULT_PORT } = {}) {
     start() {
       return new Promise((resolve) => {
         server.listen(port, '0.0.0.0', () => {
-          log.info(`已启动: http://0.0.0.0:${port} -> ${BACKEND_HOST}:${BACKEND_PORT}`);
+          log.info(`已启动: http://0.0.0.0:${port} -> ${BACKEND_HOST}:${BACKEND_PORT}（鉴权: ${authRequired() ? 'LibreTV 会话' : '已关闭'}）`);
           resolve(true);
         });
       });

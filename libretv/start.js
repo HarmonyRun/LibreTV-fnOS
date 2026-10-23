@@ -22,6 +22,16 @@ const dataDir =
   path.join(__dirname, 'var');
 
 process.env.LIBRETV_DATA_DIR = dataDir;
+
+// 构建版本信息（community=侧载/社区版；store=应用商店送审版）
+const BUILD_INFO = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, 'version.json'), 'utf8'));
+  } catch {
+    return {};
+  }
+})();
+const STORE_EDITION = BUILD_INFO.edition === 'store';
 try {
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(path.join(dataDir, 'queue'), { recursive: true });
@@ -231,7 +241,9 @@ try {
     }
   })();
   const updCfg = cfg && cfg.update && typeof cfg.update === 'object' ? cfg.update : {};
-  if (updCfg.enabled !== false) {
+  // 商店送审版默认关闭应用内 OTA（更新走应用中心）；用户显式配置可覆盖
+  const updEnabled = typeof updCfg.enabled === 'boolean' ? updCfg.enabled : !STORE_EDITION;
+  if (updEnabled) {
     const { createUpdater } = require(path.join(__dirname, 'updater', 'index.js'));
     updaterHandle = createUpdater({
       dataDir,
@@ -243,7 +255,7 @@ try {
     });
     updaterHandle.start();
   } else {
-    log('info', '自动更新已禁用（config.update.enabled=false）');
+    log('info', STORE_EDITION ? '自动更新已禁用（商店版默认；更新请走应用中心）' : '自动更新已禁用（config.update.enabled=false）');
   }
 } catch (err) {
   log('error', `更新服务启动失败（不影响主服务）: ${err && err.stack ? err.stack : err}`);

@@ -51,6 +51,7 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_SYNC="${SKIP_SYNC:-0}"
 SKIP_NAS_BUILD="${SKIP_NAS_BUILD:-0}"
 SKIP_NODE_DOWNLOAD="${SKIP_NODE_DOWNLOAD:-0}"
+EDITION="${EDITION:-community}"
 MISSING_ENGINE_FATAL="${MISSING_ENGINE_FATAL:-0}"
 
 SSH_WRAPPER="$ROOT_DIR/scripts/ssh.sh"
@@ -185,7 +186,7 @@ find "$APP_SERVER" -name '*.DS_Store' -type f -delete 2>/dev/null || true
 
 [ -f "$APP_SERVER/server.js" ] || die "组装失败：app/server/server.js 不存在"
 [ -d "$APP_SERVER/node_modules/next" ] || die "组装失败：app/server/node_modules/next 不存在"
-printf '{"name":"LibreTV-fnOS","version":"%s","builtAt":"%s"}\n' "${APP_VERSION}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$APP_SERVER/version.json"
+printf '{"name":"LibreTV-fnOS","version":"%s","edition":"%s","builtAt":"%s"}\n' "${APP_VERSION}" "${EDITION}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$APP_SERVER/version.json"
 
 info "app/server 大小: $(human_size "$APP_SERVER")"
 

@@ -199,3 +199,13 @@
 - 应用中心停止：8 秒后无进程/端口，确认看护不会复活应用；再次启动正常；
 - 日志：`var/watchdog.log` 记录“父进程已退出，接管并重启应用”、子进程 PID；
 - 该机制在 `server/` 载荷内，可随 OTA 更新。
+
+## 15. 商店送审改造验证（1.0.11）
+
+- **8091 鉴权**：复用 LibreTV `ltv_session` 会话；未登录请求 302 到 8090，登录后 200，HLS/WebSocket 同样校验；
+- **manifest**：`maintainer/distributor=HarmonyRun`、补 GitHub 地址与 changelog、删除废弃 arch；
+- **store edition**：`edition=store` 默认不启动应用内更新服务（8093 不监听）；community edition 保持 OTA；
+- **实机验证**：1.0.11 store/community 均安装运行；8091 未登录 302、登录 200；watchdog 正常；索引/STRM 保留；
+- 送审包：`dist/app-store-submission/libretv-1.0.11-store.fpk`
+  SHA256 `05f3cee5cb40bf4a4bdf68f16bb3f636fc4e5f854a57a5df3dad78941f59e2b9`；
+- 隐私说明：`docs/PRIVACY.md`；截图：`docs/app-store/screenshots/`。

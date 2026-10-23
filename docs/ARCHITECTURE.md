@@ -322,3 +322,10 @@ engine 处理完成后：
 - 正常停止：`start.js` SIGTERM → 写 `watchdog.stop` 并终止看护，看护退出；
 - 重启退避 5s→10s→20s→60s，稳定 5 分钟重置；子进程 stdout/stderr 继续写 `app.log`；
 - 看护代码在 `server/` 载荷内，可通过 OTA 更新，无需改 `cmd/main`。
+
+## 18. 商店送审改造（1.0.11）
+
+- 8091 复用 LibreTV `ltv_session` Cookie 鉴权（HMAC 同 auth.ts；Cookie 不区分端口）；未登录 302→8090；
+- manifest 补 maintainer/distributor URL、changelog，删除 arch；
+- `EDITION=store` 构建写入 `version.json.edition=store`；start.js 在 store 版默认不启动 updater；
+- 隐私说明 `docs/PRIVACY.md`；送审材料在 `docs/app-store/` 与 `dist/app-store-submission/`。
