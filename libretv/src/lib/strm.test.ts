@@ -3,6 +3,8 @@ import {
   DEFAULT_FNV_BASE_URL,
   DEFAULT_SYNC_INTERVAL_HOURS,
   fnvStatus,
+  formatMigrateResult,
+  formatRemoveResult,
   formatSyncResult,
   makeJobId,
   mergeStrmConfig,
@@ -13,6 +15,7 @@ import {
   tailLogLines,
   validateAddPayload,
   validateRefreshPayload,
+  validateRemovePayload,
 } from './strm';
 
 describe('validateAddPayload', () => {
@@ -77,6 +80,128 @@ describe('validateRefreshPayload', () => {
     expect(validateRefreshPayload({ sourceApiBase: 'https://a.com/api', vodId: '9' }).ok).toBe(true);
     expect(validateRefreshPayload({ sourceApiBase: 'https://a.com/api' }).ok).toBe(false);
     expect(validateRefreshPayload({ vodId: '9' }).ok).toBe(false);
+  });
+});
+
+describe('validateRemovePayload', () => {
+  it('只带 key 时补齐空字符串字段', () => {
+    const r = validateRemovePayload({ key: 'https://a.com/api::1' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toEqual({ key: 'https://a.com/api::1', title: '', year: '' });
+  });
+
+  it('无 key 时可用 title，并去除首尾空格 / 支持可选精确条件', () => {
+    const r = validateRemovePayload({
+      title: '  庆余年  ',
+      year: ' 2019 ',
+      type: 'tv',
+      season: 2,
+      dryRun: false,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toEqual({
+      key: '',
+      title: '庆余年',
+      year: '2019',
+      type: 'tv',
+      season: 2,
+      dryRun: false,
+    });
+  });
+
+  it('key / title 至少提供一个，非对象直接拒绝', () => {
+    expect(validateRemovePayload({}).ok).toBe(false);
+    expect(validateRemovePayload({ key: '   ', title: '   ' }).ok).toBe(false);
+    expect(validateRemovePayload(null).ok).toBe(false);
+    expect(validateRemovePayload('key').ok).toBe(false);
+    expect(validateRemovePayload([]).ok).toBe(false);
+  });
+
+  it('key 最长 512 / title 最长 256', () => {
+    expect(validateRemovePayload({ key: 'k'.repeat(512) }).ok).toBe(true);
+    expect(validateRemovePayload({ key: 'k'.repeat(513) }).ok).toBe(false);
+    expect(validateRemovePayload({ title: 't'.repeat(256) }).ok).toBe(true);
+    expect(validateRemovePayload({ title: 't'.repeat(257) }).ok).toBe(false);
+    expect(validateRemovePayload({ key: 'k'.repeat(513) })).toEqual({
+      ok: false,
+      error: 'key 过长（最多 512 字符）',
+    });
+  });
+
+  it('season 只能是 1–99 的正整数（数字字符串也接受）', () => {
+    for (const bad of [0, 100, 1.5, -1, 'abc', true, '0', '100']) {
+      expect(validateRemovePayload({ key: 'k', season: bad }).ok, String(bad)).toBe(false);
+    }
+    for (const good of [1, 99, '3', ' 12 ']) {
+      expect(validateRemovePayload({ key: 'k', season: good }).ok, String(good)).toBe(true);
+    }
+    const r = validateRemovePayload({ key: 'k', season: '3' });
+    expect(r.ok && r.value.season).toBe(3);
+  });
+
+  it('type 只能是 movie/tv，dryRun 只能是 boolean', () => {
+    expect(validateRemovePayload({ key: 'k', type: 'movie' }).ok).toBe(true);
+    expect(validateRemovePayload({ key: 'k', type: 'tv' }).ok).toBe(true);
+    expect(validateRemovePayload({ key: 'k', type: 'anime' }).ok).toBe(false);
+    expect(validateRemovePayload({ key: 'k', dryRun: true }).ok).toBe(true);
+    expect(validateRemovePayload({ key: 'k', dryRun: 'yes' }).ok).toBe(false);
+    expect(validateRemovePayload({ key: 'k', dryRun: 1 }).ok).toBe(false);
+  });
+
+  it('非法输入返回中文错误信息', () => {
+    expect(validateRemovePayload({})).toEqual({ ok: false, error: 'key 与 title 至少需要提供一个' });
+    expect(validateRemovePayload({ key: 'k', type: 'anime' })).toEqual({
+      ok: false,
+      error: 'type 只能是 movie 或 tv',
+    });
+    expect(validateRemovePayload({ key: 'k', dryRun: 'yes' })).toEqual({
+      ok: false,
+      error: 'dryRun 必须是布尔值',
+    });
+  });
+});
+
+describe('formatRemoveResult', () => {
+  it('按引擎契约输出目录数 / 文件数 / 索引移除数', () => {
+    expect(
+      formatRemoveResult({
+        ok: true,
+        mode: 'resource',
+        dirsRemoved: 1,
+        deletedFiles: 3,
+        entriesRemoved: 1,
+        prunedEntries: 0,
+        failed: 0,
+      })
+    ).toBe('已移除 1 个目录（3 个文件），索引移除 1 条');
+  });
+
+  it('只移除某季时补充裁剪说明，失败目录数用警示补充', () => {
+    expect(
+      formatRemoveResult({
+        dirsRemoved: 1,
+        deletedFiles: 8,
+        entriesRemoved: 0,
+        prunedEntries: 1,
+        failed: 2,
+      })
+    ).toBe('已移除 1 个目录（8 个文件），索引移除 0 条 · 1 条索引仅移除该季 · 2 个目录删除失败');
+  });
+
+  it('兼容旧实现的数组写法与 dryRun 前缀', () => {
+    expect(
+      formatRemoveResult({ dryRun: true, deletedDirs: ['a', 'b'], deletedFiles: 5, removedEntries: [{}, {}] })
+    ).toBe('试运行 · 已移除 2 个目录（5 个文件），索引移除 2 条');
+  });
+
+  it('空结果返回空字符串，字段缺失按 0 处理', () => {
+    expect(formatRemoveResult(null)).toBe('');
+    expect(formatRemoveResult({})).toBe('');
+    expect(formatRemoveResult({ dirsRemoved: 0, deletedFiles: 0, entriesRemoved: 0 })).toBe(
+      '已移除 0 个目录（0 个文件），索引移除 0 条'
+    );
   });
 });
 
@@ -289,5 +414,33 @@ describe('summarizeIndex / tailLogLines / 状态文案', () => {
       '检查 3 · 更新 1 · 删除 0 · 孤儿 2 · 错误 0'
     );
     expect(formatSyncResult(null)).toBe('');
+  });
+});
+
+describe('formatMigrateResult', () => {
+  it('按契约输出迁移 / 跳过 / 失败数量', () => {
+    expect(
+      formatMigrateResult({
+        ok: true,
+        dryRun: false,
+        checked: 5,
+        migrated: 3,
+        skipped: 1,
+        failed: 1,
+        entries: [{ title: '庆余年', from: 'https://a.com/api', to: 'https://b.com/api', files: 3 }],
+      })
+    ).toBe('迁移 3 条（跳过 1，失败 1）');
+  });
+
+  it('dryRun 结果加「试运行」前缀', () => {
+    expect(formatMigrateResult({ dryRun: true, migrated: 2, skipped: 0, failed: 0 })).toBe(
+      '试运行 · 迁移 2 条（跳过 0，失败 0）'
+    );
+  });
+
+  it('字段缺失按 0 处理，空结果返回空字符串', () => {
+    expect(formatMigrateResult({ migrated: 2 })).toBe('迁移 2 条（跳过 0，失败 0）');
+    expect(formatMigrateResult({})).toBe('');
+    expect(formatMigrateResult(null)).toBe('');
   });
 });

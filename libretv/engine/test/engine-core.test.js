@@ -669,3 +669,362 @@ test('reclaimEmptyResourceDirs：宽限期内新建空目录不删', async () =>
   assert.equal(stats.emptyDirsRemoved, 0);
   assert.equal(fs.existsSync(fresh), true);
 });
+
+// —— 加固 b：尊重手动删除（资源目录整体消失时不再补写） ——
+
+test('handleSync：资源目录被整体删除时按手动移除处理，不再补写也不重建目录', async () => {
+  const { dir, engine, root } = makeEngine(async () =>
+    jsonResponse({ code: 1, list: [vod('手动删剧', '2026', 'HD$https://cdn.example.com/a.m3u8')] })
+  );
+  await engine.handleAdd({ sourceApiBase: API, vodId: '7001', vodName: '手动删剧', vodYear: '2026', type: 'movie' });
+  const resourceDir = path.join(root, '手动删剧 (2026)');
+  assert.equal(fs.existsSync(path.join(resourceDir, '手动删剧 (2026).strm')), true);
+
+  // 模拟用户在飞牛影视里删除整部影片（连目录一起删掉）
+  fs.rmSync(resourceDir, { recursive: true, force: true });
+
+  const stats = await engine.handleSync();
+  assert.equal(stats.manualRemoved, 1);
+  assert.equal(stats.filesRestored, 0);
+  assert.equal(fs.existsSync(resourceDir), false);
+  const index = readJson(path.join(dir, 'strm-index.json'));
+  assert.equal(index.entries[indexStore.entryKey(API, '7001')], undefined);
+});
+
+test('handleSync：respectManualRemoval=false 时仍按误删补齐', async () => {
+  const { dir, engine, root } = makeEngine(
+    async () => jsonResponse({ code: 1, list: [vod('手动删剧', '2026', 'HD$https://cdn.example.com/a.m3u8')] }),
+    { respectManualRemoval: false }
+  );
+  await engine.handleAdd({ sourceApiBase: API, vodId: '7002', vodName: '手动删剧', vodYear: '2026', type: 'movie' });
+  const resourceDir = path.join(root, '手动删剧 (2026)');
+  fs.rmSync(resourceDir, { recursive: true, force: true });
+
+  const stats = await engine.handleSync();
+  assert.equal(stats.manualRemoved, 0);
+  assert.equal(stats.filesRestored, 1);
+  assert.equal(fs.existsSync(path.join(resourceDir, '手动删剧 (2026).strm')), true);
+  assert.notEqual(readJson(path.join(dir, 'strm-index.json')).entries[indexStore.entryKey(API, '7002')], undefined);
+});
+
+// —— 加固 b：remove 队列任务（设置页「移除」按钮与 MCP 共用） ——
+
+test('handleRemove：删除整个资源目录并移除索引条目', async () => {
+  const { dir, engine, root } = makeEngine(async () =>
+    jsonResponse({ code: 1, list: [vod('要删的片', '2026', 'HD$https://cdn.example.com/a.m3u8')] })
+  );
+  await engine.handleAdd({ sourceApiBase: API, vodId: '7101', vodName: '要删的片', vodYear: '2026', type: 'movie' });
+  const key = indexStore.entryKey(API, '7101');
+  const resourceDir = path.join(root, '要删的片 (2026)');
+  assert.equal(fs.existsSync(resourceDir), true);
+
+  const result = await engine.handleRemove({ key });
+  assert.equal(result.ok, true);
+  assert.equal(result.mode, 'resource');
+  assert.deepEqual(result.deletedDirs, [resourceDir]);
+  assert.equal(result.deletedFiles, 1);
+  assert.equal(result.removedEntries.length, 1);
+  assert.equal(result.removedEntries[0].key, key);
+  assert.equal(fs.existsSync(resourceDir), false);
+  assert.equal(readJson(path.join(dir, 'strm-index.json')).entries[key], undefined);
+  assert.equal(fs.existsSync(root), true);
+});
+
+test('handleRemove：dryRun 只返回计划，不改文件与索引', async () => {
+  const { dir, engine, root } = makeEngine(async () =>
+    jsonResponse({ code: 1, list: [vod('要删的片', '2026', 'HD$https://cdn.example.com/a.m3u8')] })
+  );
+  await engine.handleAdd({ sourceApiBase: API, vodId: '7102', vodName: '要删的片', vodYear: '2026', type: 'movie' });
+  const key = indexStore.entryKey(API, '7102');
+  const resourceDir = path.join(root, '要删的片 (2026)');
+
+  const result = await engine.handleRemove({ key, dryRun: true });
+  assert.equal(result.dryRun, true);
+  assert.equal(result.dirs.length, 1);
+  assert.equal(result.totalFiles, 1);
+  assert.equal(fs.existsSync(resourceDir), true);
+  assert.notEqual(readJson(path.join(dir, 'strm-index.json')).entries[key], undefined);
+});
+
+test('handleRemove：season 模式只删该季目录，其余季保留并裁剪索引', async () => {
+  const { dir, engine, root } = makeEngine(async () => jsonResponse({ code: 1, list: [] }));
+  const resourceDir = path.join(root, '两季剧 (2025)');
+  const s1 = path.join(resourceDir, 'Season 01', '两季剧 - S01E01.strm');
+  const s2 = path.join(resourceDir, 'Season 02', '两季剧 - S02E01.strm');
+  for (const file of [s1, s2]) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'https://cdn.example.com/ep.m3u8\n', 'utf8');
+  }
+  const key = indexStore.entryKey(API, '7201');
+  const index = indexStore.createEmptyIndex();
+  indexStore.upsertEntry(index, {
+    type: 'tv',
+    title: '两季剧',
+    year: '2025',
+    sourceName: '源',
+    sourceApiBase: API,
+    vodId: '7201',
+    strmPaths: [s1, s2],
+    lastKnownUrls: ['https://cdn.example.com/e1.m3u8', 'https://cdn.example.com/e2.m3u8'],
+    lastSyncedAt: new Date().toISOString(),
+    consecutiveFailures: 0,
+    lastError: '',
+  });
+  indexStore.saveIndex(dir, index);
+
+  const result = await engine.handleRemove({ key, season: 2 });
+  assert.equal(result.mode, 'season');
+  assert.deepEqual(result.deletedDirs, [path.join(resourceDir, 'Season 02')]);
+  assert.equal(fs.existsSync(s1), true);
+  assert.equal(fs.existsSync(s2), false);
+  assert.equal(result.prunedEntries.length, 1);
+  const entry = readJson(path.join(dir, 'strm-index.json')).entries[key];
+  assert.deepEqual(entry.strmPaths, [s1]);
+  assert.deepEqual(entry.lastKnownUrls, ['https://cdn.example.com/e1.m3u8']);
+});
+
+test('processQueueOnce：remove 任务被消费并通过 lastResult 暴露计数', async () => {
+  const { dir, engine, root } = makeEngine(async () =>
+    jsonResponse({ code: 1, list: [vod('队列删片', '2026', 'HD$https://cdn.example.com/a.m3u8')] })
+  );
+  await engine.handleAdd({ sourceApiBase: API, vodId: '7301', vodName: '队列删片', vodYear: '2026', type: 'movie' });
+  const key = indexStore.entryKey(API, '7301');
+  const resourceDir = path.join(root, '队列删片 (2026)');
+  const jobId = 'job-test-remove-1';
+  fs.mkdirSync(path.join(dir, 'queue'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'queue', `${jobId}.json`),
+    JSON.stringify({ id: jobId, createdAt: new Date().toISOString(), action: 'remove', payload: { key } }),
+    'utf8'
+  );
+
+  const summary = await engine.processQueueOnce();
+  assert.equal(summary.succeeded, 1);
+  assert.equal(fs.existsSync(resourceDir), false);
+  assert.equal(readJson(path.join(dir, 'strm-index.json')).entries[key], undefined);
+  const state = readJson(path.join(dir, 'state.json'));
+  assert.equal(state.engine.lastResult.action, 'remove');
+  assert.equal(state.engine.lastResult.jobId, jobId);
+  assert.equal(state.engine.lastResult.ok, true);
+  assert.equal(state.engine.lastResult.result.mode, 'resource');
+  assert.equal(state.engine.lastResult.result.dirsRemoved, 1);
+  assert.equal(state.engine.lastResult.result.deletedFiles, 1);
+  assert.equal(state.engine.lastResult.result.entriesRemoved, 1);
+});
+
+test('handleSync：URL 变化但资源目录已被手动删除时仍按移除处理（不因 URL 轮换复活）', async () => {
+  const urlA = 'https://cdn.example.com/a/index.m3u8';
+  const urlB = 'https://cdn.example.com/b/index.m3u8';
+  let currentUrl = urlA;
+  const { dir, engine, root } = makeEngine(async () =>
+    jsonResponse({ code: 1, list: [vod('轮换剧', '2026', `HD$https://cdn.example.com/x.m3u8`, 'liangzi')] })
+  );
+  await engine.handleAdd({
+    sourceApiBase: API,
+    vodId: '7401',
+    vodName: '轮换剧',
+    vodYear: '2026',
+    type: 'movie',
+  });
+  const resourceDir = path.join(root, '轮换剧 (2026)');
+  assert.equal(fs.existsSync(resourceDir), true);
+
+  // 模拟用户在飞牛影视里删掉整部影片，且源站 URL 恰好轮换（旧实现会判定为「更新」并重新写回）
+  fs.rmSync(resourceDir, { recursive: true, force: true });
+  currentUrl = urlB;
+  const stats = await engine.handleSync();
+  assert.equal(stats.manualRemoved, 1);
+  assert.equal(stats.updated, 0);
+  assert.equal(fs.existsSync(resourceDir), false);
+  assert.equal(readJson(path.join(dir, 'strm-index.json')).entries[indexStore.entryKey(API, '7401')], undefined);
+});
+
+// —— 换源迁移：源被替换后原地重建 STRM（文件名不变、索引换源、可追更） ——
+
+const MIG_OLD = 'https://old-source.example.com/api.php/provide/vod';
+const MIG_NEW = 'https://new-source.example.com/api.php/provide/vod';
+const MIG_PLAY_URLS = [
+  '第01集$https://cdn.new.example.com/1.m3u8',
+  '第02集$https://cdn.new.example.com/2.m3u8',
+  '第03集$https://cdn.new.example.com/3.m3u8',
+];
+
+function migrationFetch({ oldFails = true, newVodName = '迁移测试剧', withDetail = true } = {}) {
+  return async (url) => {
+    const parsed = new URL(url);
+    if (parsed.hostname === 'old-source.example.com') {
+      if (oldFails) throw new Error('ECONNRESET');
+    }
+    if (parsed.hostname === 'new-source.example.com') {
+      const ac = parsed.searchParams.get('ac');
+      if (ac === 'videolist' && parsed.searchParams.get('wd')) {
+        return jsonResponse({
+          code: 1,
+          list: [{ vod_id: 9001, vod_name: newVodName, vod_year: '2026' }],
+        });
+      }
+      if (ac === 'videolist' && parsed.searchParams.get('ids')) {
+        if (!withDetail) return jsonResponse({ code: 1, list: [] });
+        return jsonResponse({
+          code: 1,
+          list: [
+            {
+              vod_id: 9001,
+              vod_name: '迁移测试剧',
+              vod_year: '2026',
+              vod_play_from: 'lzm3u8',
+              vod_play_url: MIG_PLAY_URLS.join('#'),
+            },
+          ],
+        });
+      }
+    }
+    throw new Error('unexpected url ' + url);
+  };
+}
+
+function seedOldEntry(dir, root, { vodId = '111', title = '迁移测试剧', year = '2026', episodes = 2 } = {}) {
+  const seasonDir = path.join(root, `${title} (${year})`, 'Season 01');
+  fs.mkdirSync(seasonDir, { recursive: true });
+  const strmPaths = [];
+  const lastKnownUrls = [];
+  for (let i = 1; i <= episodes; i += 1) {
+    const file = path.join(seasonDir, `${title} - S01E0${i}.strm`);
+    const oldUrl = `https://cdn.old.example.com/${i}.m3u8`;
+    fs.writeFileSync(file, oldUrl + '\n', 'utf8');
+    strmPaths.push(file);
+    lastKnownUrls.push(oldUrl);
+  }
+  const key = indexStore.entryKey(MIG_OLD, vodId);
+  const index = indexStore.createEmptyIndex();
+  indexStore.upsertEntry(index, {
+    type: 'tv',
+    title,
+    year,
+    sourceName: '旧源',
+    sourceApiBase: MIG_OLD,
+    vodId,
+    strmPaths,
+    lastKnownUrls,
+    lastSyncedAt: new Date().toISOString(),
+    consecutiveFailures: 0,
+    lastError: '',
+  });
+  indexStore.saveIndex(dir, index);
+  return { key, strmPaths, episodeCount: episodes };
+}
+
+test('handleSync：源被替换后自动换源迁移，文件名不变、索引换到新源，并补齐新集', async () => {
+  const { dir, engine, root } = makeEngine(migrationFetch(), {
+    sources: [{ key: 'env_0', name: '新源', url: MIG_NEW }],
+  });
+  const seeded = seedOldEntry(dir, root);
+  const oldKey = seeded.key;
+  const newKey = indexStore.entryKey(MIG_NEW, '9001');
+
+  const stats = await engine.handleSync();
+  assert.equal(stats.migrated, 1);
+
+  const index = readJson(path.join(dir, 'strm-index.json'));
+  assert.equal(index.entries[oldKey], undefined, '旧 key 应被移除');
+  const entry = index.entries[newKey];
+  assert.ok(entry, '应写入新 key');
+  assert.equal(entry.title, '迁移测试剧');
+  assert.equal(entry.year, '2026');
+  assert.equal(entry.sourceApiBase, MIG_NEW);
+  // 原有文件名/路径完全不变（E01/E02），内容换成新源地址
+  assert.deepEqual(entry.strmPaths.slice(0, 2), seeded.strmPaths);
+  assert.equal(fs.readFileSync(seeded.strmPaths[0], 'utf8'), 'https://cdn.new.example.com/1.m3u8\n');
+  assert.equal(fs.readFileSync(seeded.strmPaths[1], 'utf8'), 'https://cdn.new.example.com/2.m3u8\n');
+  // 新源多出的第 3 集按原命名补齐（追更）
+  const extra = path.join(root, '迁移测试剧 (2026)', 'Season 01', '迁移测试剧 - S01E03.strm');
+  assert.equal(entry.strmPaths.length, 3);
+  assert.equal(entry.strmPaths[2], extra);
+  assert.equal(fs.readFileSync(extra, 'utf8'), 'https://cdn.new.example.com/3.m3u8\n');
+  assert.deepEqual(entry.lastKnownUrls, [
+    'https://cdn.new.example.com/1.m3u8',
+    'https://cdn.new.example.com/2.m3u8',
+    'https://cdn.new.example.com/3.m3u8',
+  ]);
+});
+
+test('handleSync：新源找不到同名条目时跳过迁移，不动原文件', async () => {
+  const { dir, engine, root } = makeEngine(migrationFetch({ newVodName: '完全不同的剧' }), {
+    sources: [{ key: 'env_0', name: '新源', url: MIG_NEW }],
+  });
+  const seeded = seedOldEntry(dir, root);
+  const stats = await engine.handleSync();
+  assert.equal(stats.migrated, 0);
+  assert.equal(stats.errors, 1);
+  const index = readJson(path.join(dir, 'strm-index.json'));
+  assert.ok(index.entries[seeded.key], '无匹配时保留旧条目');
+  assert.equal(
+    fs.readFileSync(seeded.strmPaths[0], 'utf8'),
+    'https://cdn.old.example.com/1.m3u8\n',
+    '原文件内容不应被改写'
+  );
+});
+
+test('handleSync：新源条目已存在（key 冲突）时跳过迁移', async () => {
+  const { dir, engine, root } = makeEngine(migrationFetch(), {
+    sources: [{ key: 'env_0', name: '新源', url: MIG_NEW }],
+  });
+  const seeded = seedOldEntry(dir, root);
+  const newKey = indexStore.entryKey(MIG_NEW, '9001');
+  const index = readJson(path.join(dir, 'strm-index.json'));
+  indexStore.upsertEntry(index, {
+    type: 'tv',
+    title: '迁移测试剧',
+    year: '2026',
+    sourceName: '新源',
+    sourceApiBase: MIG_NEW,
+    vodId: '9001',
+    strmPaths: [path.join(root, '迁移测试剧 (2026)', 'Season 01', '迁移测试剧 - S01E01.strm')],
+    lastKnownUrls: ['https://cdn.new.example.com/1.m3u8'],
+    lastSyncedAt: new Date().toISOString(),
+    consecutiveFailures: 0,
+    lastError: '',
+  });
+  indexStore.saveIndex(dir, index);
+
+  const stats = await engine.handleSync();
+  assert.equal(stats.migrated, 0);
+  const after = readJson(path.join(dir, 'strm-index.json'));
+  assert.ok(after.entries[seeded.key], '冲突时保留旧条目');
+  assert.ok(after.entries[newKey], '新条目保持不变');
+});
+
+test('handleMigrate：dryRun 只统计不落盘；正式执行后原地重建', async () => {
+  const { dir, engine, root } = makeEngine(migrationFetch(), {
+    sources: [{ key: 'env_0', name: '新源', url: MIG_NEW }],
+  });
+  const seeded = seedOldEntry(dir, root);
+  const newKey = indexStore.entryKey(MIG_NEW, '9001');
+
+  const dry = await engine.handleMigrate({ dryRun: true });
+  assert.equal(dry.ok, true);
+  assert.equal(dry.dryRun, true);
+  assert.equal(dry.migrated, 1);
+  assert.equal(fs.readFileSync(seeded.strmPaths[0], 'utf8'), 'https://cdn.old.example.com/1.m3u8\n');
+  assert.ok(readJson(path.join(dir, 'strm-index.json')).entries[seeded.key]);
+
+  const real = await engine.handleMigrate({});
+  assert.equal(real.migrated, 1);
+  const index = readJson(path.join(dir, 'strm-index.json'));
+  assert.equal(index.entries[seeded.key], undefined);
+  assert.ok(index.entries[newKey]);
+  assert.equal(fs.readFileSync(seeded.strmPaths[0], 'utf8'), 'https://cdn.new.example.com/1.m3u8\n');
+});
+
+test('handleSync：migrateOnSourceChange=false 时不做换源迁移', async () => {
+  const { dir, engine, root } = makeEngine(migrationFetch(), {
+    sources: [{ key: 'env_0', name: '新源', url: MIG_NEW }],
+    migrateOnSourceChange: false,
+  });
+  const seeded = seedOldEntry(dir, root);
+  const stats = await engine.handleSync();
+  assert.equal(stats.migrated, 0);
+  const index = readJson(path.join(dir, 'strm-index.json'));
+  assert.ok(index.entries[seeded.key]);
+  assert.equal(fs.readFileSync(seeded.strmPaths[0], 'utf8'), 'https://cdn.old.example.com/1.m3u8\n');
+});

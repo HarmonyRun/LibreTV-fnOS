@@ -32,6 +32,7 @@ rules:
   - DOMAIN-SUFFIX,lzcdn27.com,DIRECT
   - DOMAIN-SUFFIX,lzcdn28.com,DIRECT
   - DOMAIN-SUFFIX,maoyanplay.top,DIRECT
+  - DOMAIN-SUFFIX,ppqrrs.com,DIRECT
   - DOMAIN-SUFFIX,ryplay11.com,DIRECT
   - DOMAIN-SUFFIX,ryplay13.com,DIRECT
   - DOMAIN-SUFFIX,ryplay15.com,DIRECT

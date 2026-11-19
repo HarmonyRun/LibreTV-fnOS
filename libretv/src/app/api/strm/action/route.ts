@@ -1,15 +1,16 @@
 import { NextResponse } from 'next/server';
 import { guardRequest, jsonError } from '@/lib/api-guard';
-import { validateRefreshPayload, type StrmActionName } from '@/lib/strm';
+import { isPlainRecord, validateRefreshPayload, type StrmActionName } from '@/lib/strm';
 import { enqueueStrmJob, findPendingJob, readConfigPublic } from '@/lib/strm-server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const ACTIONS: StrmActionName[] = ['sync', 'cleanup', 'refresh'];
+const ACTIONS: StrmActionName[] = ['sync', 'cleanup', 'refresh', 'migrate'];
 
 /**
- * 手动触发引擎动作：sync 全量增量同步 / cleanup 快扫清理 / refresh 重新同步单个条目。
+ * 手动触发引擎动作：sync 全量增量同步 / cleanup 快扫清理 / refresh 重新同步单个条目 /
+ * migrate 换源迁移（把仍指向已失效采集源的条目按当前源重新搜索并原地重写 STRM）。
  * 统一入队后立即返回 202；sync 已有未处理任务时直接返回已有 jobId（避免重复全量同步）。
  */
 export async function POST(req: Request) {
@@ -26,7 +27,7 @@ export async function POST(req: Request) {
 
     const action = (body as { action?: unknown } | null)?.action;
     if (typeof action !== 'string' || !ACTIONS.includes(action as StrmActionName)) {
-      return jsonError('action 只能是 sync、cleanup 或 refresh', 400);
+      return jsonError('action 只能是 sync、cleanup、refresh 或 migrate', 400);
     }
     const actionName = action as StrmActionName;
 
@@ -36,6 +37,13 @@ export async function POST(req: Request) {
       const validated = validateRefreshPayload(body);
       if (!validated.ok) return jsonError(validated.error, 400);
       payload = { ...validated.value };
+    }
+    // migrate 可选 dryRun（只统计不落盘）：传了就必须是布尔值，透传给引擎
+    if (actionName === 'migrate' && isPlainRecord(body) && 'dryRun' in body) {
+      if (typeof body.dryRun !== 'boolean') {
+        return jsonError('dryRun 必须是布尔值', 400);
+      }
+      payload = { dryRun: body.dryRun };
     }
 
     const config = await readConfigPublic();

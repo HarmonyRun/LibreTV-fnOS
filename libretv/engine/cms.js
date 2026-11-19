@@ -392,6 +392,39 @@ async function fetchDetail(options = {}) {
   });
 }
 
+/**
+ * 按关键词搜索（苹果 CMS V10）。永不抛出异常，供「换源迁移」在其它源里找同名条目。
+ * @param {object} options {sourceApiBase, keyword, fetchImpl?, timeoutMs?, retries?}
+ * @returns {{ok:true, list:Array, raw:object} | {ok:false, error:string, transient:boolean}}
+ */
+async function searchVods(options = {}) {
+  const sourceApiBase = str(options.sourceApiBase);
+  if (!/^https?:\/\//i.test(sourceApiBase)) {
+    return { ok: false, error: 'sourceApiBase 无效', transient: false };
+  }
+  const keyword = str(options.keyword);
+  if (!keyword) return { ok: false, error: '搜索关键词不能为空', transient: false };
+  let response;
+  try {
+    response = await fetchJson(searchUrl(sourceApiBase, keyword), {
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.timeoutMs,
+      retries: options.retries,
+    });
+  } catch (err) {
+    return { ok: false, error: (err && err.message) || '搜索请求失败', transient: true };
+  }
+  let data;
+  try {
+    data = JSON.parse(response.text);
+  } catch {
+    return { ok: false, error: '响应不是合法 JSON', transient: true };
+  }
+  const list = extractVodList(data);
+  if (list === null) return { ok: false, error: '源站响应缺少 list 字段', transient: true };
+  return { ok: true, list, raw: data };
+}
+
 module.exports = {
   UA,
   DEFAULT_TIMEOUT_MS,
@@ -400,6 +433,7 @@ module.exports = {
   searchUrl,
   detailUrl,
   fetchJson,
+  searchVods,
   resolveUrl,
   isM3u8Url,
   parsePlayUrl,

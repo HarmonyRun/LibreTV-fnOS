@@ -1,7 +1,7 @@
 # LibreTV 飞牛 OS 原生应用（内置 STRM 自动化引擎）
 
 > **项目仓库**：<https://github.com/HarmonyRun/LibreTV-fnOS>  
-> **安装包下载**：<https://github.com/HarmonyRun/LibreTV-fnOS/releases>（Release 附件 `libretv-1.0.11.fpk`）  
+> **安装包下载**：<https://github.com/HarmonyRun/LibreTV-fnOS/releases>（Release 附件 `libretv-1.0.13.fpk`）  
 > 本项目基于开源项目 [LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV)（AGPL-3.0）二次开发，
 > 上游 fork：<https://github.com/HarmonyRun/LibreTV>。
 
@@ -12,8 +12,12 @@ FPK 应用，并在**同一进程**内内置「全自动 STRM 引擎」：
 - 飞牛影视把该目录当普通媒体库扫描，**海报墙**立即出现影片；
 - 播放时飞牛影视返回 **302 重定向**，客户端直连源站，**NAS 本地只占 KB 级文本**、几乎不耗流量；
 - 自动追更：源站新增剧集时，下次同步自动补写新集 STRM；空资源目录自动回收（1.0.9 新增）；
+- **换源迁移（1.0.13）**：采集源被替换/被墙后，已入库条目自动按当前源找回同名剧集并**原地重写 STRM**（文件名不变、影视进度保留），后续追更改走新源；
+- **尊重手动删除（1.0.12）**：在飞牛影视里把整部剧删掉后，同步不再把它当“误删”补写回来；
+- **条目管理（1.0.12）**：设置页「媒体库」新增已入库条目列表与逐条「移除」（删目录 + 清索引 + 刷新影视）；
 - 自愈看护：应用异常退出（崩溃/OOM）后 watchdog 自动重启，正常停止不复活（1.0.10 新增）；
 - 应用商店送审准备：8091 复用 LibreTV 登录会话鉴权 + 商店版默认关闭 OTA（1.0.11）；
+- **媒体库匹配修复（1.0.12）**：新版影视 `mediadb/list` 不再返回目录字段时自动用旧端点补齐，定向扫描恢复可用；
 - 每 6 小时自动增量同步（URL 变化自动覆写、新增集数自动补齐、失效条目清理、孤儿文件清扫），并自动调用
   飞牛影视 API 触发**定向扫描**（密钥内置，用户只需填媒体账号密码）。
 
@@ -88,7 +92,10 @@ STRM 生成后，引擎会调用飞牛影视 API 对**发生变化的目录**做
 | 媒体库名称 | 留空 = 自动匹配路径包含 STRM 根目录的媒体库（可同时匹配电影/剧集库） |
 
 - 填写账号密码后，引擎会自动登录 → 获取 token → 用内置密钥签名 → 调
-  `POST /v/api/v1/mdb/scan/<guid> {"dir_list":[...]}`（实测 `code=0`）。
+  `POST /v/api/v1/mediadb/scan/<guid> {"dir_list":[...]}`（实测 `code=0`）。
+- **1.0.12 起匹配可靠**：影视 0.9.8+ 的 `mediadb/list` 只返回展示字段、不再返回目录，
+  引擎会自动再请求旧端点 `mdb/list` 取 `dir_list` 并按 guid 合并，因此不再出现
+  「未匹配到媒体库（unknown-path-fields）」的降级；设置页状态显示 `API` 即表示定向扫描生效。
 - 未填写账号密码时，自动刷新降级为：`engine.log` 输出待扫描目录 + 尽力更新目录 mtime +
   UI 状态显示「未配置 / 降级」，此时在飞牛影视里手动点一次扫描即可，**不影响 STRM 生成与播放**。
 
@@ -100,10 +107,10 @@ STRM 生成后，引擎会调用飞牛影视 API 对**发生变化的目录**做
 |---|---|
 | 点「加入媒体库」 | 立即 `202 Accepted`；后台：拉 CMS 详情 → 解析 m3u8 → 写 STRM → 更新索引 → 触发影视扫描 |
 | 启动时 | 检查 STRM 根目录；从 `var/strm-index.json` 恢复索引；不扫描全站 |
-| 每 6 小时（可调 1–168h） | 遍历索引重新拉详情：URL 变化/新增集数 → 重建补写；本地 `.strm` 缺失 → 自动补齐；CMS 明确不存在**连续 3 次** → 删除；随后快扫清理孤儿 `.strm` 与空目录 |
+| 每 6 小时（可调 1–168h） | 换源迁移（1.0.13）：源已不在预置列表 / 网络不可达的条目，先按当前源找回同名条目并原地重建；随后遍历索引重新拉详情：URL 变化/新增集数 → 重建补写；本地 `.strm` 缺失但资源目录仍在 → 自动补齐；**资源目录整体消失 → 视为用户主动删除，移除索引且不再补写**（1.0.12）；CMS 明确不存在**连续 3 次** → 删除；随后快扫清理孤儿 `.strm` 与空目录 |
 | 每 5 分钟 | 空资源目录回收：第一层资源目录 0 个 `.strm` 且超过 5 分钟宽限 → 整个目录（含 nfo/海报）删除并清理索引 |
-| 每次变更 | 变更的剧名目录去重后调用影视 `mdb/scan` 定向扫描（`-14` 任务冲突自动停任务重试） |
-| 手动 | 设置页提供「立即同步 / 立即清理 / 刷新状态」 |
+| 每次变更 | 变更的剧名目录去重后调用影视 `mdb/scan` 定向扫描（`-14` 任务冲突自动停任务重试）；新版影视缺目录字段时自动回退旧端点取 `dir_list`（1.0.12） |
+| 手动 | 设置页提供「立即同步 / 立即清理 / 刷新状态」「换源迁移」（1.0.13），以及「已入库条目」列表的逐条「移除」（1.0.12） |
 
 > 引擎**只处理用户主动点「加入媒体库」的条目**，不会抓取全部片源，避免产生大量无人观看的 STRM。
 
@@ -130,15 +137,20 @@ STRM 生成后，引擎会调用飞牛影视 API 对**发生变化的目录**做
 
 | 项目 | 结果 |
 |---|---|
-| `fnpack build` | ✅ 零错误，`dist/libretv-1.0.11.fpk` |
+| `fnpack build` | ✅ 零错误，`dist/libretv-1.0.13.fpk`（51.3M，SHA256 `4f31e6cf…`） |
 | 安装到 /vol2、启动、`/api/auth` 200 | ✅ |
-| 引擎单测 / Web 单测 / lint / tsc | ✅ 81 / 440 / 0 / 0 |
+| 引擎单测 / Web 单测 / lint / tsc | ✅ 101 / 467 / 0 / 0 |
 | 电影「加入媒体库」→ STRM 落盘 | ✅《沙丘 (2020)》 |
 | 剧集「加入媒体库」→ 整季 SxxExx | ✅《庆余年 第一季》46 集 |
 | 6h 增量同步 + 孤儿清理 | ✅ checked=2, orphansDeleted=1 |
 | 重启应用后索引/STRM 保留 | ✅ 2 条 / 47 个 |
 | 飞牛影视自动识别 STRM | ✅ `can_play=1`、`recognition_status=2`（file_monitor 秒级） |
 | 影视定向扫描 API | ✅ `code=0 data=true`；`-14` 冲突可停止旧任务 |
+| **定向扫描修复（1.0.12）** | ✅ 实机 `state.fnv.lastMode="api"`、`lastError=""`、`飞牛影视刷新成功 library=LibreTV`（媒体库路径由旧端点补齐） |
+| **设置页「移除」（1.0.12）** | ✅ 实机 `POST /api/strm/remove` → `dirsRemoved=1 deletedFiles=2 entriesRemoved=1`，索引 18→17，资源目录消失 |
+| **尊重手动删除（1.0.12）** | ✅ 实机整目录删除后触发同步：`manualRemoved=1 updated=0`，目录未被重建、索引移除 |
+| **换源迁移（1.0.13）** | ✅ 实机：24 条已入库条目中 17 条自动迁到新源（无尽/非凡/猫眼），`migrated=17 skipped=7 failed=0`；STRM 文件名与路径完全不变、影视 media guid 不变（播放进度保留）；迁移后同步只剩 6 条旧源条目报错 |
+| **迁移后播放（1.0.13）** | ✅ 迁移后的 m3u8 直链 200、`application/vnd.apple.mpegurl`；影视定向扫描 `飞牛影视刷新成功 dirs=17` |
 | **302 播放** | ⚠️ 需人工点播确认（程序化探测受媒体服务任务状态限制，见 docs/FINAL-VERIFY.md §5、docs/VERIFY-STRM.md §4） |
 
 ---
@@ -152,7 +164,8 @@ STRM 生成后，引擎会调用飞牛影视 API 对**发生变化的目录**做
 3. **302 播放依赖飞牛影视版本与设置**：需影视 ≥ 0.9.1 并开启「直连播放」（设置 → 服务器 → 直连播放，
    `direct_link_enable`）。若播放失败，请先在影视 Web 端人工确认，再判断是否为源站问题。
 4. **自动刷新可能降级**：未填媒体账号密码、媒体 API 变更、secret/apiKey 随版本变化时，自动扫描会降级为
-   日志提示 + 手动扫描，不影响 STRM 生成与 302 播放能力。
+   日志提示 + 手动扫描，不影响 STRM 生成与 302 播放能力。1.0.12 已修复「新版 mediadb/list 无目录字段」
+   导致的必现降级（见十六节）。
 5. **预置片源不由本应用控制**：默认 4 个源健康度无保证（实测优质资源 yzzy-api 本次不可用），连续失败请换源
    （LibreTV → 设置 → 源管理）。
 6. **媒体库需用户手动添加一次**：应用无法代替用户创建媒体库；之后新增内容可自动扫描。
@@ -162,6 +175,26 @@ STRM 生成后，引擎会调用飞牛影视 API 对**发生变化的目录**做
 ---
 
 ## 七、常见问题
+
+**Q：换了采集源，之前入库的片子还指向旧源、不能追更？**
+A：1.0.13 起会自动换源迁移：同步时发现条目所用源已不在 `config.json` 的 `sources` 里（或网络不可达），
+会自动在当前预置源中按**原片名**找回同名剧集，并用原文件名/目录**原地重写** STRM，索引切换到新源，
+之后追更走新源；飞牛影视因为路径没变，播放进度保留。也可在 **设置 → 媒体库 → 换源迁移** 手动触发，
+任务结果会给出「迁移 N / 跳过 M / 失败 K」。找不到同名条目、集数差异过大、或新源条目已存在时会跳过，
+不会删除或覆盖现有文件。如需关闭同步时的自动迁移：`config.json` 设 `"migrateOnSourceChange": false`。
+
+**Q：搜索不到任何影视资源（结果一直为空 / 源全部失败）？**
+A：先看「搜索」页每个源的状态点：如果**所有源都失败/超时**，通常不是 LibreTV 的问题，而是采集站域名在
+NAS 所在网络不可达。国内常见两种原因：① 采集站域名被 **DNS 污染**（解析到无关 IP，连接超时）；
+② 域名被阻断（TLS 握手被重置）。可在 NAS 上执行
+`curl -m 10 "https://<源地址>?ac=videolist&wd=测试"` 验证；若返回超时/连接重置，就需要**换可用的源**：
+- 在 LibreTV 网页 **设置 → 源管理 → 添加** 新的采集接口（苹果 CMS V10 的 `.../api.php/provide/vod`）；
+- 或修改 `/vol2/@appdata/libretv/config.json` 的 `sources` 数组（`[{"key":"env_0","name":"源名","url":"..."}]`），
+  然后重启应用（应用中心停止/启动），预置源会重新下发到网页；
+- 若之前失败过的源被自动停用（源管理里显示「已停用」），点该页的 **一键恢复** 或清除健康度后再试；
+- 能出结果但个别源失败属正常（源站本身不稳定），可只勾选可用的源。
+> 本仓库 `clash/rules-snippet.yaml` 维护了采集站 CDN 直连规则；客户端播放报「STRM 直连播放异常」时按
+> [docs/CLASH-RULES.md](docs/CLASH-RULES.md) 把 CDN 域名设为 DIRECT。
 
 **Q：设置页显示「STRM 根目录不可写」？**
 A：到 **应用中心 → LibreTV → 应用设置 → 授权目录**，把该目录添加为「读写」。这是飞牛权限模型的必要一步。
@@ -175,6 +208,13 @@ A：多为源站防盗链或链接失效。换源重新「加入媒体库」，�
 **Q：Web 打不开 / 忘记密码？**
 A：应用中心确认应用运行；`curl http://127.0.0.1:8090/api/auth` 应返回 200。密码在
 `/vol2/@appdata/libretv/config.json` 的 `password` 字段，改后重启应用。日志见 `app.log` / `engine.log`。
+
+**Q：在飞牛影视里删掉某部片，过几小时它又自己回来了？**
+A：1.0.11 及更早版本里，影视侧删除只删库记录 + `.strm` 文件，LibreTV 索引仍保留该条目，
+6 小时增量同步会把缺失文件当「误删」补写回来（影视 file_monitor 随即重新入库）。
+1.0.12 起两种方式都能彻底移除：① 设置 → 媒体库 →「已入库条目」里点「移除」（推荐）；
+② 直接在飞牛影视里删整部剧（整个资源目录消失）——同步会按「用户主动删除」移除索引，不再补写。
+若要保留旧行为（目录丢了也自动补齐），在 `config.json` 设 `"respectManualRemoval": false`。
 
 **Q：如何升级/重装？**
 A：提升 `libretv-fpk/manifest` 的 version 后重新构建安装（appcenter 升级会保留 var）；同版本重装会被
@@ -318,10 +358,21 @@ MCP 搜索资源、加入影视库、删除 STRM、触发同步与媒体库扫�
 
 - 每次增量同步（默认 6 小时，可在设置中设为 1–168 小时）都会重新拉取已入库条目的详情；
 - 如果源站新增剧集（如 9 集 → 30 集），自动在对应 `Season NN` 目录补写新增集的 `.strm`，并触发影视扫描；
-- 如果本地 `.strm` 被误删但源站 URL 未变，同步时自动补齐缺失文件；
-- 同步结果会记录 `episodesAdded` / `filesRestored`，可在引擎日志中查看。
+- 如果本地 `.strm` 被误删、但资源目录还在（例如只删了几集），同步时自动补齐缺失文件；
+- **如果整个资源目录都不在了（例如在飞牛影视里删掉整部剧），按“用户主动删除”处理：移除索引、不再补写**（1.0.12）；
+- 同步结果会记录 `episodesAdded` / `filesRestored` / `manualRemoved`，可在引擎日志中查看。
 
 > 想更快追更，把「同步间隔」改为 1–2 小时即可；采集源请求量随条目数线性增加。
+> 1.0.12 起「尊重手动删除」默认开启；如仍希望目录丢失后自动重建，可在 `var/config.json` 设
+> `"respectManualRemoval": false`（写在顶层，保存设置不会覆盖它）。
+
+### 从媒体库移除（1.0.12 新增）
+
+- 设置 → 媒体库 →「已入库条目」列出当前全部条目（片名/类型/STRM 数/最近同步/失败次数）；
+- 点「移除」二次确认后入队异步执行：删除该条目在 STRM 根目录下的整个资源目录（含 nfo/海报）、
+  从 `strm-index.json` 移除条目、并触发飞牛影视刷新；也可只删某一季（MCP `remove_from_library` 的 `season`）；
+- 与 MCP 的 `remove_from_library` 走同一套引擎逻辑，行为一致；
+- 移除后仍可在 LibreTV 搜索并重新「加入媒体库」。
 
 ### 空资源目录回收
 
@@ -357,7 +408,60 @@ MCP 搜索资源、加入影视库、删除 STRM、触发同步与媒体库扫�
 - 审核通过后先进入内测组，内测满一周后开放公测；
 - 详细清单：[docs/APP-STORE-SUBMISSION.md](docs/APP-STORE-SUBMISSION.md)。
 
-## 十六、许可证与致谢
+## 十六、1.0.12 加固（媒体库匹配 / 尊重手动删除 / 条目移除）
+
+### 1. 媒体库匹配修复（新版影视 `mediadb/list` 缺目录字段）
+
+- 实测影视 0.9.8+ 的 `GET /v/api/v1/mediadb/list` 只返回展示字段（guid/title/poster/category…），
+  **不再返回 `dir_list`**；引擎原先拿不到目录路径，`state.fnv.lastError` 会一直写
+  `未匹配到媒体库（unknown-path-fields）`，自动刷新降级为「utimes 目录 + 等影视 file_monitor」。
+- 1.0.12：主端点成功但没有路径时，自动再请求旧端点 `GET /v/api/v1/mdb/list`（该端点仍返回
+  `name` + `dir_list`），按 guid 合并目录；扫描仍走 `mediadb/scan`。定向扫描恢复，设置页
+  「飞牛影视」状态会显示 `API` 而非 `降级`。
+- 相关代码：[engine/fnv-client.js](libretv/engine/fnv-client.js) 的 `listLibraries()` / `mergeLibraryPaths()`。
+
+### 2. 尊重手动删除
+
+- 同步时若某条目对应资源目录（`strmdata` 第一层）整体不存在，视为用户在飞牛影视里主动删除：
+  移除索引条目、跳过补写，日志 `资源目录已被手动删除，按用户移除处理（不再补写）`，
+  同步统计新增 `manualRemoved`。
+- 仅在**整个资源目录消失**时触发；只删部分集数/单季仍按「误删」补齐。
+- 开关：`var/config.json` → `"respectManualRemoval": false` 关闭（默认 `true`）。
+- 相关代码：[engine/engine-core.js](libretv/engine/engine-core.js) 的 `handleSync()` / `areAllResourceRootsMissing()`。
+
+### 3. 已入库条目列表与「移除」
+
+- 新 API：`GET /api/strm/entries`（索引投影，按片名排序）、`POST /api/strm/remove`
+  （校验后入队 `action=remove`，立即返回 `202 {jobId}`）。
+- 引擎新增 `handleRemove()`（队列任务 `remove`，支持 `season` / `dryRun`），与 MCP
+  `remove_from_library` 共用 [engine/library-remove.js](libretv/engine/library-remove.js)：
+  匹配条目 → 定位资源目录 → 删目录 → 裁剪/移除索引 → 触发影视刷新。
+- 顺序为「先写索引、再删文件」：即使删除中途失败，残留文件也会被孤儿清理回收，不会反向复活。
+- 设置页组件：[src/components/strm-entries.tsx](libretv/src/components/strm-entries.tsx)（二次确认 + 轮询任务结果 + 刷新列表）。
+
+## 十七、换源迁移（1.0.13）
+
+采集站域名经常被墙或整体替换。以前换源后，旧条目的 `sourceApiBase` 已失效，6 小时同步只会报
+`fetch failed`，STRM 里的播放地址停留在旧源，也不会再追更。1.0.13 起支持**自动换源迁移**：
+
+- **触发时机**
+  - 同步开始前：条目使用的源已不在 `config.json` 的 `sources` 列表中（即换源了）→ 自动迁移；
+  - 同步过程中：某条目旧源网络不可达（如被墙）→ 尝试迁移到其它可用预置源；
+  - 手动：设置 → 媒体库 →「换源迁移」按钮（入队 `action=migrate`），逐条探测旧源，不可用/条目不存在才迁移。
+- **怎么迁**
+  1. 在当前预置源里按**原片名**搜索，按「片名完全一致（或包含）+ 年份一致」打分，只接受高置信候选；
+  2. 拉新源详情，仍用**原条目的 title/year** 重建 STRM 路径 → 文件名、目录完全不变；
+  3. 按旧文件逐个原地覆写播放地址（新源多出的集数按原命名补写；新源缺集时保留旧文件不删）；
+  4. 索引 key 换成 `新源::新vodId`，title/year/type 原样保留，`strmPaths` 不变；
+  5. 触发飞牛影视定向刷新（路径没变，影视条目与**播放进度不受影响**），之后同步/追更走新源。
+- **安全边界**：找不到同名条目、集数差异过大（超过 25% 且 >3 集）、新源条目已存在（key 冲突）时**跳过**，
+  不删除、不覆盖任何现有文件；日志与任务结果里都有 `checked/migrated/skipped/failed` 计数。
+- **开关**：`var/config.json` → `"migrateOnSourceChange": false` 可关闭同步时的自动迁移（手动按钮仍可用）。
+- 相关代码：[engine/cms.js](libretv/engine/cms.js) 的 `searchVods()`、[engine/engine-core.js](libretv/engine/engine-core.js)
+  的 `migrateEntry()` / `runSourceMigration()` / `handleMigrate()`；设置页按钮在
+  [src/components/strm-panel.tsx](libretv/src/components/strm-panel.tsx)。
+
+## 十八、许可证与致谢
 
 - 本项目以 **AGPL-3.0-or-later** 发布（与上游 LibreTV 一致），见 [LICENSE](LICENSE)。
 - 上游项目：[LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV)；本项目是面向飞牛 OS 的

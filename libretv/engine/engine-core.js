@@ -23,6 +23,7 @@ const { atomicWriteFile, atomicWriteJson, ensureDir, isInside, removeFileQuiet }
 const { createLogger } = require('./logger');
 const { FnvClient, matchLibraries } = require('./fnv-client');
 const { resolveFnvSecrets } = require('./fnv-secrets');
+const libraryRemove = require('./library-remove');
 
 const DEFAULT_SYNC_INTERVAL_HOURS = 6;
 const MIN_SYNC_INTERVAL_HOURS = 1;
@@ -51,7 +52,17 @@ function safeJson(value) {
 }
 
 function emptySyncResult() {
-  return { checked: 0, updated: 0, deleted: 0, orphansDeleted: 0, episodesAdded: 0, filesRestored: 0, errors: 0 };
+  return {
+    checked: 0,
+    updated: 0,
+    deleted: 0,
+    orphansDeleted: 0,
+    episodesAdded: 0,
+    filesRestored: 0,
+    manualRemoved: 0,
+    migrated: 0,
+    errors: 0,
+  };
 }
 
 /** state.engine.lastResult 只保留概要，避免把全部 URL 写进 state.json */
@@ -59,7 +70,17 @@ function summarizeResult(action, result) {
   if (!result || typeof result !== 'object') return result === undefined ? null : result;
   if (action === 'sync') {
     const out = {};
-    for (const key of ['checked', 'updated', 'deleted', 'orphansDeleted', 'episodesAdded', 'filesRestored', 'errors']) {
+    for (const key of [
+      'checked',
+      'updated',
+      'deleted',
+      'orphansDeleted',
+      'episodesAdded',
+      'filesRestored',
+      'manualRemoved',
+      'migrated',
+      'errors',
+    ]) {
       if (Number.isFinite(result[key])) out[key] = result[key];
     }
     if (result.skipped) out.skipped = true;
@@ -85,6 +106,40 @@ function summarizeResult(action, result) {
       emptyDirsRemoved: result.emptyDirsRemoved || 0,
       emptyDirsFilesRemoved: result.emptyDirsFilesRemoved || 0,
       entriesRemoved: result.entriesRemoved || 0,
+    };
+  }
+  if (action === 'remove') {
+    // 只保留计数，避免把目录/条目原文写进 state.json
+    return {
+      ok: result.ok !== false,
+      dryRun: result.dryRun === true,
+      mode: result.mode || '',
+      dirsRemoved: Array.isArray(result.deletedDirs)
+        ? result.deletedDirs.length
+        : Number(result.totalDirs) || 0,
+      deletedFiles: Number(result.deletedFiles) || 0,
+      entriesRemoved: Array.isArray(result.removedEntries) ? result.removedEntries.length : 0,
+      prunedEntries: Array.isArray(result.prunedEntries) ? result.prunedEntries.length : 0,
+      failed: Array.isArray(result.failed) ? result.failed.length : 0,
+    };
+  }
+  if (action === 'migrate') {
+    // 换源迁移只保留计数与少量条目概要，避免 state.json 膨胀
+    return {
+      ok: result.ok !== false,
+      dryRun: result.dryRun === true,
+      checked: Number(result.checked) || 0,
+      migrated: Number(result.migrated) || 0,
+      skipped: Number(result.skipped) || 0,
+      failed: Number(result.failed) || 0,
+      entries: Array.isArray(result.entries)
+        ? result.entries.slice(0, 20).map((item) => ({
+            title: item && item.title ? String(item.title) : '',
+            from: item && item.from ? String(item.from) : '',
+            to: item && item.to ? String(item.to) : '',
+            files: Number(item && item.files) || 0,
+          }))
+        : [],
     };
   }
   return { ok: result.ok !== false };
@@ -569,6 +624,28 @@ function createEngine(options = {}) {
     return path.join(root, first);
   }
 
+  /** 索引条目列表（[{key, ...entry}]，供共享移除模块匹配用） */
+  function allIndexEntries(index) {
+    return Object.entries(index.entries || {}).map(([key, entry]) => ({ key, ...entry }));
+  }
+
+  /**
+   * 计划里涉及的第一层资源目录是否全部不存在。
+   * 用于识别「用户在飞牛影视里把整部剧删掉」：此时不应把缺失文件当成误删去补写。
+   */
+  function areAllResourceRootsMissing(root, plan) {
+    const roots = new Set((plan || []).map((item) => refreshDirOf(root, item.absPath)));
+    if (roots.size === 0) return false;
+    for (const dir of roots) {
+      try {
+        if (fs.statSync(dir).isDirectory()) return false;
+      } catch {
+        /* 不存在：继续检查其它目录 */
+      }
+    }
+    return true;
+  }
+
   function claimedPathsExcept(index, key) {
     const claimed = new Set();
     for (const [otherKey, entry] of Object.entries(index.entries || {})) {
@@ -883,6 +960,12 @@ function createEngine(options = {}) {
           case 'cleanup':
             result = await handleCleanup();
             break;
+          case 'remove':
+            result = await handleRemove(payload);
+            break;
+          case 'migrate':
+            result = await handleMigrate(payload);
+            break;
           default:
             throw new Error(`未知任务类型: ${action || '(空)'}`);
         }
@@ -1052,6 +1135,350 @@ function createEngine(options = {}) {
     });
   }
 
+  // -------------------------------------------------------------- remove ----
+  /**
+   * 从媒体库移除条目（queue action=remove）。
+   *
+   * 与 MCP remove_from_library 共用 engine/library-remove 的计划/删除/索引裁剪逻辑，
+   * 由设置页「移除」按钮与 MCP 工具共同使用。语义：
+   *   - 默认删除整个资源目录（第一层目录，含 nfo/海报等所有文件）；
+   *   - 传 season 时只删该季目录，其余季保留（索引条目被裁剪而非删除）；
+   *   - dryRun=true 只返回计划，不改动文件与索引；
+   *   - 先写索引再删文件：即使删除中途失败，残留文件也会被孤儿清理回收，不会反向复活。
+   */
+  async function handleRemove(payload = {}) {
+    const config = readConfig();
+    const root = ensureStrmRoot(config);
+    if (!root) throw new Error('未配置可用的 STRM 根目录（请在设置中配置 strmRoot）');
+    const index = loadIndexSafe();
+    const plan = libraryRemove.planRemoval({
+      entries: allIndexEntries(index),
+      root,
+      args: payload,
+    });
+    if (!plan.ok) {
+      const err = new Error(plan.error || '移除计划生成失败');
+      err.candidates = plan.candidates;
+      throw err;
+    }
+    const titles = new Map(plan.matches.map((entry) => [entry.key, entry.title]));
+
+    if (payload.dryRun === true) {
+      return {
+        ok: true,
+        dryRun: true,
+        mode: plan.mode,
+        totalDirs: plan.plan.length,
+        totalFiles: plan.totalFiles,
+        dirs: plan.plan,
+        matchedEntries: plan.matches.map((entry) => ({
+          key: entry.key,
+          title: entry.title,
+          year: entry.year || '',
+          type: entry.type || '',
+        })),
+      };
+    }
+
+    // 先裁剪/移除索引再删文件：崩溃时残留文件会被孤儿清理删除，避免「移除后又被同步补回」
+    const { removedKeys, prunedKeys } = libraryRemove.removeIndexEntriesByDirs(index, plan.roots);
+    saveIndexSafe(index);
+    const applied = libraryRemove.applyRemoval(plan.plan);
+    if (applied.failed.length > 0) {
+      logger.warn(
+        `部分资源目录删除失败（索引已移除，残留文件将由孤儿清理回收）: ${applied.failed
+          .map((item) => `${item.dir}（${item.error}）`)
+          .join('; ')}`
+      );
+    }
+    queueRefreshDirs([root]);
+    logger.warn(
+      `已从媒体库移除: ${plan.matches
+        .map((entry) => entry.title || entry.key)
+        .join('、')} mode=${plan.mode} 目录=${applied.deletedDirs.length} 文件=${applied.deletedFiles} 索引移除=${removedKeys.length} 裁剪=${prunedKeys.length}`
+    );
+    return {
+      ok: true,
+      mode: plan.mode,
+      deletedDirs: applied.deletedDirs,
+      deletedFiles: applied.deletedFiles,
+      failed: applied.failed,
+      removedEntries: removedKeys.map((key) => ({ key, title: titles.get(key) || '' })),
+      prunedEntries: prunedKeys.map((key) => ({ key, title: titles.get(key) || '' })),
+      keptSeasons:
+        plan.mode === 'season' && plan.roots.length === 1
+          ? libraryRemove.listSeasonDirs(plan.roots[0]).map((season) => ({
+              season: season.season,
+              name: season.name,
+            }))
+          : [],
+    };
+  }
+
+  // ------------------------------------------------------ source migration ----
+  /**
+   * 换源迁移：当条目原先使用的采集源已被替换/不可达时，在当前预置源里搜索同名条目，
+   * 用「原条目的 title/year」重建 STRM 并**按旧文件路径原地覆写**（文件名、目录完全不变，
+   * 飞牛影视的播放进度得以保留），同时把索引 key 换到新源，后续同步/追更走新源。
+   */
+
+  function normalizeSourceBase(url) {
+    return typeof url === 'string' ? url.trim().replace(/\/+$/, '') : '';
+  }
+
+  /** 当前预置采集源：Map<归一化 base, 显示名> */
+  function configuredSourceEntries(config) {
+    const map = new Map();
+    for (const item of Array.isArray(config && config.sources) ? config.sources : []) {
+      const base = normalizeSourceBase(item && item.url);
+      if (!base || !/^https?:\/\//i.test(base)) continue;
+      const name = item && typeof item.name === 'string' && item.name.trim() ? item.name.trim() : base;
+      map.set(base, name);
+    }
+    return map;
+  }
+
+  /** 片名归一化（换源匹配用）：去空白与常见标点，保留季/数字信息 */
+  function migrationTitleKey(title) {
+    return String(title || '')
+      .toLowerCase()
+      .replace(/[\s\u3000]+/g, '')
+      .replace(/[：:·・,，.。!！?？'"“”‘’()（）\[\]【】\-_—–/\\|]/g, '');
+  }
+
+  /** 候选评分：片名完全相同 20 分，包含关系 8 分；年份相同 +10、不同 -8 */
+  function scoreMigrationCandidate(entry, vod) {
+    const target = migrationTitleKey(entry.title);
+    const candidate = migrationTitleKey(vod && (vod.vod_name || vod.name));
+    if (!target || !candidate) return 0;
+    let score = 0;
+    if (candidate === target) score += 20;
+    else if (candidate.includes(target) || target.includes(candidate)) score += 8;
+    else return 0;
+    const entryYear = String(entry.year || '').trim();
+    const vodYear = naming.normalizeYear((vod && (vod.vod_year || vod.vod_pubdate)) || '');
+    if (entryYear && vodYear) score += entryYear === vodYear ? 10 : -8;
+    return score;
+  }
+
+  /** 在其它预置源里搜索同名条目，返回置信度足够的最佳候选；找不到返回 null */
+  async function findMigrationTarget(entry, sourceMap) {
+    const skipBase = normalizeSourceBase(entry.sourceApiBase);
+    let best = null;
+    for (const [base, name] of sourceMap) {
+      if (base === skipBase) continue;
+      const result = await cms.searchVods({ sourceApiBase: base, keyword: entry.title, fetchImpl });
+      if (!result.ok) continue;
+      for (const vod of result.list || []) {
+        const score = scoreMigrationCandidate(entry, vod);
+        if (score > 0 && (!best || score > best.score)) {
+          best = {
+            score,
+            base,
+            name,
+            vodId: String((vod && vod.vod_id) || ''),
+            vodName: String((vod && vod.vod_name) || ''),
+          };
+        }
+      }
+    }
+    if (!best || !best.vodId) return null;
+    // 阈值：片名完全相同，或「片名包含 + 年份相同」，避免误迁到相近剧名
+    return best.score >= 18 ? best : null;
+  }
+
+  /**
+   * 迁移单个条目（不写索引，只改文件；索引由调用方统一保存）。
+   * 返回 {status:'migrated'|'would-migrate'|'skipped'|'failed', ...}
+   */
+  async function migrateEntry({ entry, oldKey, index, root, sourceMap, dryRun }) {
+    const target = await findMigrationTarget(entry, sourceMap);
+    if (!target) return { status: 'skipped', reason: 'no-match', title: entry.title };
+    const newKey = indexStore.entryKey(target.base, target.vodId);
+    if (newKey !== oldKey && index.entries[newKey]) {
+      return { status: 'skipped', reason: 'key-exists', title: entry.title };
+    }
+    const detail = await cms.fetchDetail({ sourceApiBase: target.base, vodId: target.vodId, fetchImpl });
+    if (!detail.ok || !Array.isArray(detail.chosenUrls) || detail.chosenUrls.length === 0) {
+      return { status: 'failed', reason: detail.error || '详情无可用播放地址', title: entry.title };
+    }
+    const type = entry.type === 'tv' ? 'tv' : 'movie';
+    const episodes = selectEpisodes(detail, type);
+    const plan = buildPlan({ root, type, title: entry.title, year: entry.year, episodes });
+    if (plan.length === 0) return { status: 'failed', reason: '生成 STRM 路径失败', title: entry.title };
+
+    const oldPaths = (entry.strmPaths || []).map((p) => path.resolve(p));
+    // 集数差异过大时宁可不迁，避免把别的剧/别的季写进原文件名
+    const tolerance = Math.max(3, Math.ceil(oldPaths.length * 0.25));
+    if (oldPaths.length > 0 && Math.abs(plan.length - oldPaths.length) > tolerance) {
+      return { status: 'skipped', reason: '集数差异过大', title: entry.title };
+    }
+
+    const oldUrls = Array.isArray(entry.lastKnownUrls) ? entry.lastKnownUrls : [];
+    const writes = [];
+    const nextPaths = [];
+    const nextUrls = [];
+    const common = Math.min(oldPaths.length, plan.length);
+    // 旧文件按序号原地覆写：文件名/目录保持不变 → 影视条目与播放进度不受影响
+    for (let i = 0; i < common; i += 1) {
+      nextPaths.push(oldPaths[i]);
+      nextUrls.push(plan[i].url);
+      writes.push({ absPath: oldPaths[i], url: plan[i].url });
+    }
+    // 新源比旧条目多出来的集数：按新命名生成新文件（追更）
+    for (let i = oldPaths.length; i < plan.length; i += 1) {
+      nextPaths.push(plan[i].absPath);
+      nextUrls.push(plan[i].url);
+      writes.push({ absPath: plan[i].absPath, url: plan[i].url });
+    }
+    // 新源缺集：保留旧文件与旧地址，不删除、不覆盖，尽量不影响已有进度
+    for (let i = plan.length; i < oldPaths.length; i += 1) {
+      nextPaths.push(oldPaths[i]);
+      nextUrls.push(oldUrls[i] || '');
+    }
+
+    const summary = {
+      status: 'migrated',
+      title: entry.title,
+      from: normalizeSourceBase(entry.sourceApiBase),
+      to: target.base,
+      files: writes.length,
+      newKey,
+      changedDirs: [...new Set(writes.map((item) => refreshDirOf(root, item.absPath)))],
+    };
+    if (dryRun) return { ...summary, status: 'would-migrate' };
+
+    for (const item of writes) {
+      if (!isInside(root, item.absPath)) continue;
+      ensureDir(path.dirname(item.absPath));
+      atomicWriteFile(item.absPath, item.url + '\n');
+    }
+
+    const nextEntry = {
+      type: entry.type === 'tv' ? 'tv' : 'movie',
+      title: entry.title,
+      year: entry.year || '',
+      sourceName: target.name || entry.sourceName || '',
+      sourceApiBase: target.base,
+      vodId: target.vodId,
+      strmPaths: nextPaths,
+      lastKnownUrls: nextUrls,
+      lastSyncedAt: toIso(now()),
+      consecutiveFailures: 0,
+      lastError: '',
+    };
+    if (Array.isArray(entry.warnings) && entry.warnings.length > 0) nextEntry.warnings = entry.warnings.slice();
+    if (newKey !== oldKey) indexStore.removeEntry(index, oldKey);
+    indexStore.upsertEntry(index, nextEntry);
+    logger.info(
+      `换源迁移完成: ${entry.title} 源 ${summary.from || '(空)'} → ${target.base}（原地重写 ${writes.length} 个文件）`
+    );
+    return summary;
+  }
+
+  /**
+   * 批量换源迁移。
+   * mode='unconfigured'：只处理 sourceApiBase 已不在预置源列表的条目（换源后的自动迁移）
+   * mode='unreachable'：只处理指定 keys（同步时网络不可达的条目）
+   * mode='all'：逐条探测旧源，旧源不可用/条目不存在才迁移（手动任务）
+   */
+  async function runSourceMigration({ index, root, config, mode, keys, limit, dryRun }) {
+    const stats = { checked: 0, migrated: 0, skipped: 0, failed: 0, entries: [] };
+    const sourceMap = configuredSourceEntries(config);
+    if (sourceMap.size === 0) return stats;
+
+    const candidates = [];
+    if (mode === 'unreachable') {
+      for (const key of keys || []) {
+        if (index.entries[key]) candidates.push([key, index.entries[key]]);
+      }
+    } else {
+      for (const [key, entry] of Object.entries(index.entries)) {
+        if (mode === 'unconfigured') {
+          const base = normalizeSourceBase(entry.sourceApiBase);
+          if (base && sourceMap.has(base)) continue;
+        }
+        candidates.push([key, entry]);
+      }
+    }
+
+    const max = Number.isFinite(limit) && limit > 0 ? limit : candidates.length;
+    const changedDirs = [];
+    let mutated = false;
+    for (const [key, entry] of candidates.slice(0, max)) {
+      if (stopped) break;
+      stats.checked += 1;
+      try {
+        if (mode === 'all') {
+          // 手动迁移：旧源还能正常取详情就不动，避免无谓改写
+          const probe = await cms.fetchDetail({
+            sourceApiBase: entry.sourceApiBase,
+            vodId: entry.vodId,
+            fetchImpl,
+          });
+          if (probe.ok) {
+            stats.skipped += 1;
+            continue;
+          }
+        }
+        const result = await migrateEntry({ entry, oldKey: key, index, root, sourceMap, dryRun });
+        if (result.status === 'migrated' || result.status === 'would-migrate') {
+          stats.migrated += 1;
+          if (stats.entries.length < 50) {
+            stats.entries.push({
+              title: result.title,
+              from: result.from,
+              to: result.to,
+              files: result.files,
+            });
+          }
+          if (result.status === 'migrated') {
+            changedDirs.push(...(result.changedDirs || []));
+            mutated = true;
+          }
+        } else if (result.status === 'skipped') {
+          stats.skipped += 1;
+          if (result.reason && result.reason !== 'no-match') {
+            logger.warn(`换源迁移跳过: ${result.title || entry.title} - ${result.reason}`);
+          }
+        } else {
+          stats.failed += 1;
+          if (result.reason) logger.warn(`换源迁移失败: ${result.title || entry.title} - ${result.reason}`);
+        }
+      } catch (err) {
+        stats.failed += 1;
+        logger.warn(`换源迁移异常: ${entry.title || key} - ${(err && err.message) || err}`);
+      }
+    }
+
+    if (mutated) {
+      saveIndexSafe(index);
+      queueRefreshDirs(changedDirs);
+    }
+    if (stats.checked > 0) {
+      logger.info(
+        `换源迁移检查完成: checked=${stats.checked} migrated=${stats.migrated} skipped=${stats.skipped} failed=${stats.failed}${
+          dryRun ? '（dryRun）' : ''
+        }`
+      );
+    }
+    return stats;
+  }
+
+  /** 手动触发换源迁移（queue action=migrate） */
+  async function handleMigrate(payload = {}) {
+    const config = readConfig();
+    const root = ensureStrmRoot(config);
+    if (!root) throw new Error('未配置可用的 STRM 根目录（请在设置中配置 strmRoot）');
+    const sourceMap = configuredSourceEntries(config);
+    if (sourceMap.size === 0) throw new Error('未配置预置采集源（config.sources 为空），无法换源迁移');
+    const dryRun = payload.dryRun === true;
+    const limit = Number(payload.limit) > 0 ? Math.min(500, Math.trunc(Number(payload.limit))) : 200;
+    const index = loadIndexSafe();
+    const stats = await runSourceMigration({ index, root, config, mode: 'all', limit, dryRun });
+    return { ok: true, dryRun, ...stats };
+  }
+
   // ---------------------------------------------------------------- sync ----
   /**
    * 增量同步：逐条重新拉详情，URL 变化则覆写；明确不存在连续 3 次才删除；
@@ -1066,9 +1493,26 @@ function createEngine(options = {}) {
       return stats;
     }
     const index = loadIndexSafe();
+    // 换源后的自动迁移：条目用的源已不在预置源列表时，先在当前源里找回同名条目并原地重建
+    if (config.migrateOnSourceChange !== false) {
+      try {
+        const pre = await runSourceMigration({
+          index,
+          root,
+          config,
+          mode: 'unconfigured',
+          limit: 10,
+          dryRun: false,
+        });
+        stats.migrated += pre.migrated;
+      } catch (err) {
+        logger.warn(`换源自动迁移异常: ${(err && err.message) || err}`);
+      }
+    }
     const entries = Object.entries(index.entries);
     const changedDirs = [];
     let mutated = false;
+    const unreachableKeys = [];
 
     for (let i = 0; i < entries.length; i += 1) {
       if (stopped) break;
@@ -1083,11 +1527,19 @@ function createEngine(options = {}) {
         if (detail.ok && Array.isArray(detail.chosenUrls) && detail.chosenUrls.length > 0) {
           const type = entry.type === 'tv' ? 'tv' : entry.type === 'movie' ? 'movie' : 'movie';
           const urls = detail.chosenUrls;
-          const changed = !sameUrlList(entry.lastKnownUrls || [], urls);
-          if (changed) {
-            const episodes = selectEpisodes(detail, type);
-            const plan = buildPlan({ root, type, title: entry.title, year: entry.year, episodes });
-            if (plan.length === 0) throw new Error('生成 STRM 路径失败');
+          const episodes = selectEpisodes(detail, type);
+          const plan = buildPlan({ root, type, title: entry.title, year: entry.year, episodes });
+          if (plan.length === 0) throw new Error('生成 STRM 路径失败');
+          // 手动删除优先判定：不论 URL 是否变化，先看资源目录是否还在。
+          // 否则「用户在飞牛影视里删掉整部剧 → 下次同步因 URL 轮换判定为更新 → 重新写回目录」的循环依然存在。
+          if (config.respectManualRemoval !== false && areAllResourceRootsMissing(root, plan)) {
+            indexStore.removeEntry(index, key);
+            mutated = true;
+            stats.manualRemoved += 1;
+            logger.warn(
+              `资源目录已被手动删除，按用户移除处理（不再补写）: ${entry.title || key}（${plan.length} 个文件）`
+            );
+          } else if (!sameUrlList(entry.lastKnownUrls || [], urls)) {
             const oldSet = new Set((entry.strmPaths || []).map((p) => path.resolve(p)));
             const added = plan.filter((item) => !oldSet.has(path.resolve(item.absPath))).length;
             writePlanFiles(plan);
@@ -1120,8 +1572,6 @@ function createEngine(options = {}) {
             );
           } else {
             // URL 列表没变，但本地 .strm 可能被删/路径名变化：补齐缺失文件，保持追更与手动清理一致
-            const episodes = selectEpisodes(detail, type);
-            const plan = buildPlan({ root, type, title: entry.title, year: entry.year, episodes });
             const oldPaths = entry.strmPaths || [];
             const newPaths = plan.map((item) => item.absPath);
             const newSet = new Set(newPaths.map((p) => path.resolve(p)));
@@ -1193,6 +1643,7 @@ function createEngine(options = {}) {
           entry.lastSyncedAt = toIso(now());
           stats.errors += 1;
           mutated = true;
+          unreachableKeys.push(key);
           logger.warn(
             `同步网络/临时错误（保留文件）: ${entry.title || key} - ${entry.lastError}（连续失败 ${
               entry.consecutiveFailures
@@ -1208,6 +1659,25 @@ function createEngine(options = {}) {
         logger.warn(`同步条目异常（保留文件）: ${entry.title || key} - ${entry.lastError}`);
       }
       if (i < entries.length - 1) await sleep(syncDelayMs);
+    }
+
+    // 旧源仍在预置列表里但当前不可达（如被墙）：尝试迁移到其它可用预置源
+    if (config.migrateOnSourceChange !== false && unreachableKeys.length > 0) {
+      try {
+        const post = await runSourceMigration({
+          index,
+          root,
+          config,
+          mode: 'unreachable',
+          keys: unreachableKeys,
+          limit: 10,
+          dryRun: false,
+        });
+        stats.migrated += post.migrated;
+        if (post.migrated > 0) mutated = true;
+      } catch (err) {
+        logger.warn(`换源兜底迁移异常: ${(err && err.message) || err}`);
+      }
     }
 
     if (mutated) saveIndexSafe(index);
@@ -1359,6 +1829,10 @@ function createEngine(options = {}) {
       result.checked = syncStats.checked;
       result.updated = syncStats.updated;
       result.deleted = syncStats.deleted;
+      result.manualRemoved = syncStats.manualRemoved;
+      result.migrated = syncStats.migrated;
+      result.filesRestored = syncStats.filesRestored;
+      result.episodesAdded = syncStats.episodesAdded;
       result.errors = syncStats.errors;
 
       const cleanupStats = await handleCleanup();
@@ -1505,6 +1979,8 @@ function createEngine(options = {}) {
     processQueueOnce,
     handleAdd,
     handleRefresh,
+    handleRemove,
+    handleMigrate,
     handleSync,
     handleCleanup,
     reclaimEmptyResourceDirs,

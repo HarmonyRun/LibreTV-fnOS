@@ -242,3 +242,35 @@ test('parseDetailPayload 纯函数：data.vod 单对象也兼容', () => {
   assert.equal(result.vod.vodId, '9');
   assert.deepEqual(result.chosenUrls, ['https://cdn.example.com/a.m3u8']);
 });
+
+test('searchVods：命中列表 / 网络错误 / 缺少 list 三种返回', async () => {
+  const ok = await cms.searchVods({
+    sourceApiBase: API,
+    keyword: '沙丘',
+    fetchImpl: async () => jsonResponse(vodJson()),
+  });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.list.length, 1);
+  assert.equal(ok.list[0].vod_name, '沙丘');
+
+  const netErr = await cms.searchVods({
+    sourceApiBase: API,
+    keyword: '沙丘',
+    fetchImpl: async () => {
+      throw new Error('ECONNRESET');
+    },
+  });
+  assert.equal(netErr.ok, false);
+  assert.equal(netErr.transient, true);
+
+  const noList = await cms.searchVods({
+    sourceApiBase: API,
+    keyword: '沙丘',
+    fetchImpl: async () => jsonResponse({ code: 0, msg: '参数错误' }),
+  });
+  assert.equal(noList.ok, false);
+
+  const noKeyword = await cms.searchVods({ sourceApiBase: API, keyword: '' });
+  assert.equal(noKeyword.ok, false);
+  assert.equal(noKeyword.transient, false);
+});

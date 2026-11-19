@@ -18,6 +18,7 @@ const crypto = require('crypto');
 
 const cms = require('../engine/cms');
 const indexStore = require('../engine/index-store');
+const libraryRemove = require('../engine/library-remove');
 const { FnvClient } = require('../engine/fnv-client');
 
 const DEFAULT_PORT = 8092;
@@ -38,14 +39,8 @@ const DEFAULT_SOURCES = [
   { key: 'env_3', name: '优质资源', url: 'https://api.yzzy-api.com/inc/apijson.php' },
 ];
 
-function normalizeTitle(input) {
-  return String(input || '')
-    .toLowerCase()
-    .replace(/[\s\u3000]+/g, '')
-    .replace(/第[一二三四五六七八九十百零\d]+季/g, '')
-    .replace(/season\s*\d+/g, '')
-    .replace(/[：:·・,，.。!！?？'"“”‘’()（）\[\]【】\-_—–/\\|]/g, '');
-}
+// 片名归一化/季度解析等纯函数与引擎 remove 任务共用，避免两处规则漂移
+const normalizeTitle = libraryRemove.normalizeTitle;
 
 function readJson(file) {
   try {
@@ -217,85 +212,18 @@ function createMcpServer({ dataDir, logger, port = DEFAULT_PORT, version = VERSI
     }
   }
 
-  const CN_NUM = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
-
-  /** 从目录名解析季度：Season 01 / S01 / 第1季 / 第一季 */
-  function parseSeasonNumber(name) {
-    const s = String(name || '').trim();
-    let m = /^season\s*0*(\d+)$/i.exec(s) || /^s0*(\d+)$/i.exec(s);
-    if (m) return Number(m[1]);
-    m = /^第([一二三四五六七八九十百零\d]+)季$/.exec(s);
-    if (!m) return null;
-    const raw = m[1];
-    if (/^\d+$/.test(raw)) return Number(raw);
-    if (raw === '十') return 10;
-    if (raw.length === 1 && CN_NUM[raw]) return CN_NUM[raw];
-    const ten = /^十([一二三四五六七八九])$/.exec(raw);
-    if (ten) return 10 + CN_NUM[ten[1]];
-    const tens = /^([一二三四五六七八九])十([一二三四五六七八九]?)$/.exec(raw);
-    if (tens) return CN_NUM[tens[1]] * 10 + (tens[2] ? CN_NUM[tens[2]] : 0);
-    return null;
-  }
+  // 季度解析、资源目录、文件统计、条目匹配统一复用引擎共享模块
+  const parseSeasonNumber = libraryRemove.parseSeasonNumber;
+  const listSeasonDirs = libraryRemove.listSeasonDirs;
+  const countFilesRecursive = libraryRemove.countFilesRecursive;
 
   /** 资源根目录 = strmRoot 下的第一层目录（如 庆余年 (2019)） */
   function resourceRootOfPath(absPath) {
-    const root = getStrmRoot();
-    if (!root) return null;
-    const abs = path.resolve(String(absPath));
-    if (!isInside(root, abs) || abs === root) return null;
-    const first = path.relative(root, abs).split(path.sep)[0];
-    if (!first || first === '..') return null;
-    return path.join(root, first);
+    return libraryRemove.resourceRootOfPath(getStrmRoot(), absPath);
   }
 
   function entryResourceRoots(entry) {
-    const roots = new Set();
-    for (const p of entry.strmPaths || []) {
-      const r = resourceRootOfPath(p);
-      if (r) roots.add(r);
-    }
-    return [...roots];
-  }
-
-  function listSeasonDirs(resourceRoot) {
-    const out = [];
-    try {
-      for (const name of fs.readdirSync(resourceRoot)) {
-        const abs = path.join(resourceRoot, name);
-        let st;
-        try {
-          st = fs.statSync(abs);
-        } catch {
-          continue;
-        }
-        if (!st.isDirectory()) continue;
-        const season = parseSeasonNumber(name);
-        if (season !== null) out.push({ season, name, dir: abs });
-      }
-    } catch {
-      /* ignore */
-    }
-    return out.sort((a, b) => a.season - b.season || a.name.localeCompare(b.name));
-  }
-
-  function countFilesRecursive(dir) {
-    let count = 0;
-    const stack = [dir];
-    while (stack.length) {
-      const current = stack.pop();
-      let list;
-      try {
-        list = fs.readdirSync(current, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const item of list) {
-        const abs = path.join(current, item.name);
-        if (item.isDirectory()) stack.push(abs);
-        else count += 1;
-      }
-    }
-    return count;
+    return libraryRemove.entryResourceRoots(getStrmRoot(), entry);
   }
 
   function entrySummary(entry) {
@@ -338,22 +266,9 @@ function createMcpServer({ dataDir, logger, port = DEFAULT_PORT, version = VERSI
     return Object.entries(entries).map(([key, e]) => ({ key, ...e }));
   }
 
-  /** 按标题/年份/类型查找索引条目 */
-  function matchEntries({ key, sourceApiBase, vodId, title, year, type }) {
-    const entries = allEntries();
-    if (key) return entries.filter((e) => e.key === key);
-    if (sourceApiBase && vodId) {
-      const k = indexStore.entryKey(sourceApiBase, vodId);
-      return entries.filter((e) => e.key === k);
-    }
-    const nq = normalizeTitle(title);
-    return entries.filter((e) => {
-      if (type && e.type && e.type !== type) return false;
-      if (year && e.year && String(e.year) !== String(year)) return false;
-      if (!nq) return false;
-      const nt = normalizeTitle(e.title);
-      return nt === nq || nt.includes(nq) || nq.includes(nt);
-    });
+  /** 按标题/年份/类型查找索引条目（规则与引擎 remove 任务共用） */
+  function matchEntries(args) {
+    return libraryRemove.matchEntries(allEntries(), args || {});
   }
 
   function removeEmptyParents(filePath, root) {
@@ -373,40 +288,9 @@ function createMcpServer({ dataDir, logger, port = DEFAULT_PORT, version = VERSI
     return dirs;
   }
 
-  /** 校验待删除目录：必须在 strmRoot 内且不是 strmRoot 本身 */
-  function assertDeletableDir(dir) {
-    const root = getStrmRoot();
-    if (!root) throw new Error('STRM 根目录未配置');
-    const abs = path.resolve(dir);
-    if (!isInside(root, abs) || abs === path.resolve(root)) {
-      throw new Error(`拒绝删除目录（不在 STRM 根目录内或为根目录）: ${abs}`);
-    }
-    return abs;
-  }
-
+  // 索引裁剪与引擎 remove 任务共用（不在此处重复实现，避免两套规则）
   function removeIndexEntriesByDirs(index, dirs) {
-    const removedKeys = [];
-    const prunedKeys = [];
-    if (!index || !index.entries) return { removedKeys, prunedKeys };
-    for (const [key, entry] of Object.entries(index.entries)) {
-      const paths = Array.isArray(entry.strmPaths) ? entry.strmPaths : [];
-      const urls = Array.isArray(entry.lastKnownUrls) ? entry.lastKnownUrls : [];
-      const keep = [];
-      paths.forEach((p, i) => {
-        const abs = path.resolve(String(p));
-        const hit = dirs.some((dir) => isInside(dir, abs));
-        if (!hit) keep.push(i);
-      });
-      if (keep.length === 0) {
-        delete index.entries[key];
-        removedKeys.push(key);
-      } else if (keep.length !== paths.length) {
-        entry.strmPaths = keep.map((i) => paths[i]);
-        entry.lastKnownUrls = keep.filter((i) => i < urls.length).map((i) => urls[i]);
-        prunedKeys.push(key);
-      }
-    }
-    return { removedKeys, prunedKeys };
+    return libraryRemove.removeIndexEntriesByDirs(index, dirs);
   }
 
   async function refreshMedia(dirList) {
@@ -751,139 +635,67 @@ function createMcpServer({ dataDir, logger, port = DEFAULT_PORT, version = VERSI
   }
 
   async function toolRemoveFromLibrary(args) {
-    const seasonRaw = args.season;
-    const seasonNum =
-      seasonRaw === undefined || seasonRaw === null || seasonRaw === ''
-        ? null
-        : Number(seasonRaw);
-    if (seasonNum !== null && (!Number.isInteger(seasonNum) || seasonNum < 1)) {
-      throw new Error('season 必须是正整数（1 表示 Season 01）');
-    }
     const dryRun = args.dryRun === true;
-    const all = args.all === true;
-    const titleQuery = str(args.title);
-
-    let matches = matchEntries({
-      key: str(args.key),
-      sourceApiBase: str(args.sourceApiBase),
-      vodId: str(args.vodId),
-      title: titleQuery,
-      year: str(args.year),
-      type: str(args.type),
-    });
-    if (!matches.length) throw new Error('没有找到匹配的条目');
-    // 标题优先精确匹配；没有精确匹配时才使用模糊结果，避免「庆余年」误删「庆余年2」
-    if (titleQuery) {
-      const exact = matches.filter((e) => normalizeTitle(e.title) === normalizeTitle(titleQuery));
-      if (exact.length) matches = exact;
-    }
-
-    const rootEntries = new Map();
-    for (const entry of matches) {
-      for (const root of entryResourceRoots(entry)) {
-        if (!rootEntries.has(root)) rootEntries.set(root, []);
-        rootEntries.get(root).push(entry);
-      }
-    }
-    if (!rootEntries.size) throw new Error('索引条目找不到对应的 STRM 资源目录（可能文件已被移动/删除）');
-
     const strmRoot = getStrmRoot();
-    const rel = (p) => path.relative(strmRoot, p);
-    const rootCandidates = () =>
-      [...rootEntries.keys()].map((root) => ({
-        resourceRoot: rel(root),
-        entries: rootEntries.get(root).map((e) => e.title),
-        seasons: listSeasonDirs(root).map((s) => ({ season: s.season, name: s.name })),
-      }));
+    if (!strmRoot) throw new Error('STRM 根目录未配置');
 
-    let dirs = [];
-    let mode = '';
-
-    if (seasonNum !== null) {
-      if (rootEntries.size > 1) {
-        return {
-          error: '匹配到多个资源目录，无法确定要删除哪一季；请用 key 精确指定单个条目，或先 list_library 确认',
-          candidates: rootCandidates(),
-        };
-      }
-      const [root] = rootEntries.keys();
-      const seasons = listSeasonDirs(root);
-      const hit = seasons.filter((s) => s.season === seasonNum);
-      if (!hit.length) {
-        throw new Error(
-          `未找到 Season ${seasonNum}（可用季：${seasons.map((s) => s.season).join(', ') || '无 Season 目录'}）`
-        );
-      }
-      dirs = hit.map((s) => s.dir);
-      mode = 'season';
-    } else {
-      if (rootEntries.size > 1 && !all) {
-        return {
-          error: '匹配到多个资源目录（可能多季分别成目录，或模糊匹配到多部剧）；确认全部删除请传 all=true，或指定 key 精确删除',
-          candidates: rootCandidates(),
-        };
-      }
-      dirs = [...rootEntries.keys()];
-      mode = 'resource';
+    // 计划/删除/索引裁剪复用引擎共享模块，保证与设置页 remove 任务行为一致
+    const plan = libraryRemove.planRemoval({
+      entries: allEntries(),
+      root: strmRoot,
+      args: {
+        key: str(args.key),
+        sourceApiBase: str(args.sourceApiBase),
+        vodId: str(args.vodId),
+        title: str(args.title),
+        year: str(args.year),
+        type: str(args.type),
+        season: args.season,
+        all: args.all === true,
+      },
+    });
+    if (!plan.ok) {
+      if (plan.candidates) return { error: plan.error, candidates: plan.candidates };
+      throw new Error(plan.error || '移除计划生成失败');
     }
-
-    // 安全校验：每个目录都必须在 STRM 根目录内、且不能是根目录自身
-    const uniqueDirs = [...new Set(dirs.map((d) => path.resolve(d)))];
-    for (const dir of uniqueDirs) assertDeletableDir(dir);
-
-    const plan = uniqueDirs.map((dir) => ({
-      dir,
-      resourceRoot: rel(dir),
-      files: countFilesRecursive(dir),
-    }));
-    const totalFiles = plan.reduce((sum, item) => sum + item.files, 0);
 
     if (dryRun) {
       return {
         dryRun: true,
-        mode,
-        dirs: plan,
-        totalFiles,
-        matchedEntries: matches.map(entrySummary),
+        mode: plan.mode,
+        dirs: plan.plan,
+        totalFiles: plan.totalFiles,
+        matchedEntries: plan.matches.map(entrySummary),
       };
     }
 
-    const deletedDirs = [];
-    const failed = [];
-    for (const item of plan) {
-      try {
-        fs.rmSync(item.dir, { recursive: true, force: true });
-        deletedDirs.push(item.dir);
-        log.info(`已删除资源目录: ${item.dir}（${item.files} 个文件）`);
-      } catch (err) {
-        failed.push({ dir: item.dir, error: (err && err.message) || '删除失败' });
-      }
-    }
-
-    // 同步清理索引：删除目录内所有条目的路径；条目若还有其它季则保留并裁剪
+    // 先裁剪索引再删文件：删除失败时残留文件会被孤儿清理回收，不会反向复活
     const index = readIndex();
-    const entryTitles = new Map(matches.map((e) => [e.key, e.title]));
-    const { removedKeys, prunedKeys } = removeIndexEntriesByDirs(index, deletedDirs);
+    const entryTitles = new Map(plan.matches.map((e) => [e.key, e.title]));
+    const { removedKeys, prunedKeys } = removeIndexEntriesByDirs(index, plan.roots);
     saveIndex(index);
+    const applied = libraryRemove.applyRemoval(plan.plan);
+    for (const dir of applied.deletedDirs) log.info(`已删除资源目录: ${dir}`);
+    for (const item of applied.failed) log.warn(`删除资源目录失败: ${item.dir}（${item.error}）`);
 
     let refresh = { ok: false, skipped: true, reason: '未请求刷新' };
-    if (args.refreshMedia !== false && deletedDirs.length) {
-      refresh = await refreshMedia(deletedDirs).catch((err) => ({
+    if (args.refreshMedia !== false && applied.deletedDirs.length) {
+      refresh = await refreshMedia(applied.deletedDirs).catch((err) => ({
         ok: false,
         error: (err && err.message) || '刷新失败',
       }));
     }
 
     return {
-      mode,
-      deletedDirs,
-      deletedFiles: totalFiles,
-      failed,
+      mode: plan.mode,
+      deletedDirs: applied.deletedDirs,
+      deletedFiles: applied.deletedFiles,
+      failed: applied.failed,
       removedEntries: removedKeys.map((key) => ({ key, title: entryTitles.get(key) || '' })),
       prunedEntries: prunedKeys.map((key) => ({ key, title: entryTitles.get(key) || '' })),
       keptSeasons:
-        mode === 'season' && rootEntries.size === 1
-          ? listSeasonDirs([...rootEntries.keys()][0]).map((s) => ({ season: s.season, name: s.name }))
+        plan.mode === 'season' && plan.roots.length === 1
+          ? listSeasonDirs(plan.roots[0]).map((s) => ({ season: s.season, name: s.name }))
           : [],
       refresh,
     };

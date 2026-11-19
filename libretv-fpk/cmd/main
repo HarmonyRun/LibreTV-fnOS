@@ -18,7 +18,7 @@ SERVER_ENTRY="${SERVER_DIR}/start.js"
 PORT="${TRIM_SERVICE_PORT}"
 
 DEFAULT_PASSWORD="libretv"
-DEFAULT_SOURCES_JSON='[{"key":"env_0","name":"电影天堂资源","url":"https://caiji.dyttzyapi.com/api.php/provide/vod"},{"key":"env_1","name":"量子资源","url":"https://cj.lziapi.com/api.php/provide/vod"},{"key":"env_2","name":"如意资源","url":"https://cj.rycjapi.com/api.php/provide/vod"},{"key":"env_3","name":"优质资源","url":"https://api.yzzy-api.com/inc/apijson.php"}]'
+DEFAULT_SOURCES_JSON='[{"key":"env_0","name":"最大资源","url":"https://api.zuidapi.com/api.php/provide/vod"},{"key":"env_1","name":"无尽资源","url":"https://api.wujinapi.com/api.php/provide/vod"},{"key":"env_2","name":"非凡资源","url":"https://api.ffzyapi.com/api.php/provide/vod"},{"key":"env_3","name":"猫眼资源","url":"https://api.maoyanapi.top/api.php/provide/vod"}]'
 
 log_msg() {
     mkdir -p "${DATA_DIR}" 2>/dev/null

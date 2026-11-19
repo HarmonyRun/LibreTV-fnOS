@@ -1,17 +1,19 @@
 'use client';
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { strmApi, STRM_CONFIG_QUERY_KEY } from '@/lib/client-api';
 import {
   DEFAULT_FNV_BASE_URL,
   DEFAULT_SYNC_INTERVAL_HOURS,
   fnvStatus,
+  formatMigrateResult,
   formatSyncResult,
   STRM_LIMITS,
   SYNC_INTERVAL_MAX_HOURS,
   SYNC_INTERVAL_MIN_HOURS,
   type StrmConfigPublic,
+  type StrmLastResult,
   type StrmStatusResponse,
 } from '@/lib/strm';
 import { cn, formatRelativeTime } from '@/lib/utils';
@@ -19,15 +21,22 @@ import { useToast } from './toast';
 import { Icon } from './icon';
 import { SectionTitle, ToggleRow } from './settings-shared';
 import { ErrorState, Spinner } from './states';
+import { ConfirmDialog } from './confirm-dialog';
 import { McpPanel } from './mcp-panel';
+import { StrmEntriesSection } from './strm-entries';
 
 /**
  * 设置抽屉 →「媒体库 → STRM 媒体库」面板：
  * - 配置 STRM 根目录与同步间隔；
  * - 飞牛影视自动刷新（base_url / 账号 / secret_string / api_key / 媒体库名称），密码类字段只显示「已保存」；
- * - 保存 / 立即同步 / 立即清理 / 刷新状态，并展示索引条目数、队列、最近同步与 FnV 状态。
+ * - 保存 / 立即同步 / 立即清理 / 换源迁移 / 刷新状态，并展示索引条目数、队列、最近同步与 FnV 状态；
+ * - 「已入库条目」列表支持搜索与逐条移除（移除任务由引擎异步执行）。
  * 文案与交互沿用现有 Drawer / 设置面板风格（暗色主题、btn-* / input 样式）。
  */
+
+/** 换源迁移完成轮询：2s × 10 ≈ 20s（与契约一致） */
+const MIGRATE_POLL_INTERVAL_MS = 2000;
+const MIGRATE_POLL_MAX_ATTEMPTS = 10;
 
 interface Draft {
   strmRoot: string;
@@ -89,19 +98,33 @@ export function StrmMediaPanel() {
   const [pendingAction, setPendingAction] = useState<'sync' | 'cleanup' | null>(null);
   const [status, setStatus] = useState<StrmStatusResponse | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
+  // 换源迁移：确认弹窗 + 进行中（期间禁用操作按钮并轮询引擎结果）
+  const [confirmMigrate, setConfirmMigrate] = useState(false);
+  const [migrating, setMigrating] = useState(false);
   // 密码类字段是否已保存：只用于占位文案，原文不会下发到前端
   const [hasPassword, setHasPassword] = useState(false);
   const [hasSecretString, setHasSecretString] = useState(false);
   const [hasApiKey, setHasApiKey] = useState(false);
+  // 组件卸载后不再 setState（换源迁移轮询可能晚于卸载返回）
+  const aliveRef = useRef(true);
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
 
   const loadStatus = useCallback(async () => {
     setStatusLoading(true);
     try {
-      setStatus(await strmApi.status());
+      const next = await strmApi.status();
+      if (!aliveRef.current) return;
+      setStatus(next);
     } catch (err) {
-      toast(err instanceof Error ? err.message : '读取 STRM 状态失败', 'error');
+      if (aliveRef.current) toast(err instanceof Error ? err.message : '读取 STRM 状态失败', 'error');
     } finally {
-      setStatusLoading(false);
+      if (aliveRef.current) setStatusLoading(false);
     }
   }, [toast]);
 
@@ -199,6 +222,65 @@ export function StrmMediaPanel() {
       toast(err instanceof Error ? err.message : '触发失败', 'error');
     } finally {
       setPendingAction(null);
+    }
+  };
+
+  /**
+   * 等待本次换源迁移完成：优先按 jobId 精确匹配，
+   * jobId 缺失时用「action=migrate 且 at 不早于提交时间」兜底，避免读到上一次迁移的结果。
+   */
+  const waitForMigrateResult = useCallback(async (jobId: string, submittedAt: number) => {
+    for (let attempt = 0; attempt < MIGRATE_POLL_MAX_ATTEMPTS; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, MIGRATE_POLL_INTERVAL_MS));
+      if (!aliveRef.current) return null;
+      let last: StrmLastResult | null = null;
+      try {
+        const next = await strmApi.status();
+        if (!aliveRef.current) return null;
+        last = next.state?.engine?.lastResult ?? null;
+      } catch {
+        // 轮询期间的瞬时失败忽略，继续等下一次
+        continue;
+      }
+      if (!last || last.action !== 'migrate') continue;
+      if (last.jobId) {
+        if (last.jobId === jobId) return last;
+        continue;
+      }
+      const at = Date.parse(last.at ?? '');
+      if (Number.isFinite(at) && at >= submittedAt - 2000) return last;
+    }
+    return null;
+  }, []);
+
+  /** 二次确认后提交换源迁移，并轮询引擎结果（成功后刷新面板状态） */
+  const runMigrate = async () => {
+    if (migrating) return;
+    setConfirmMigrate(false);
+    setMigrating(true);
+    const submittedAt = Date.now();
+    try {
+      const result = await strmApi.migrate();
+      if (!aliveRef.current) return;
+      toast('已提交换源迁移', 'success');
+
+      const last = await waitForMigrateResult(result.jobId, submittedAt);
+      if (!aliveRef.current) return;
+
+      await loadStatus();
+      if (!aliveRef.current) return;
+
+      if (!last) {
+        toast('换源迁移任务已提交，等待结果超时，请稍后刷新状态确认', 'warning');
+      } else if (last.ok === false) {
+        toast(`换源迁移失败：${last.error || '未知错误'}`, 'error');
+      } else {
+        toast(formatMigrateResult(last.result) || '换源迁移完成', 'success');
+      }
+    } catch (err) {
+      if (aliveRef.current) toast(err instanceof Error ? err.message : '换源迁移失败', 'error');
+    } finally {
+      if (aliveRef.current) setMigrating(false);
     }
   };
 
@@ -370,16 +452,24 @@ export function StrmMediaPanel() {
             <button
               className="btn-ghost btn-sm"
               onClick={() => void runAction('sync')}
-              disabled={pendingAction !== null || !configuredRoot}
+              disabled={pendingAction !== null || migrating || !configuredRoot}
             >
               {pendingAction === 'sync' ? '同步中…' : '立即同步'}
             </button>
             <button
               className="btn-ghost btn-sm"
               onClick={() => void runAction('cleanup')}
-              disabled={pendingAction !== null || !configuredRoot}
+              disabled={pendingAction !== null || migrating || !configuredRoot}
             >
               {pendingAction === 'cleanup' ? '清理中…' : '立即清理'}
+            </button>
+            <button
+              className="btn-ghost btn-sm"
+              onClick={() => setConfirmMigrate(true)}
+              disabled={pendingAction !== null || migrating || !configuredRoot}
+              title="把仍指向已失效采集源的条目按当前预置源重新搜索并原地重写 STRM"
+            >
+              {migrating ? '迁移中…' : '换源迁移'}
             </button>
           </div>
 
@@ -452,8 +542,20 @@ export function StrmMediaPanel() {
               </details>
             )}
           </div>
+
+          {/* 已入库条目：搜索 / 逐条移除（入队后由引擎异步删除并清理索引） */}
+          <StrmEntriesSection onChanged={() => void loadStatus()} />
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmMigrate}
+        title="换源迁移"
+        confirmLabel="开始迁移"
+        message="将把仍指向已失效采集源的已入库条目，按当前预置采集源重新搜索同名剧集，并原地重写 STRM 文件（文件名与目录不变，飞牛影视播放进度保留）；找不到同名条目或无法确认的条目会跳过，不会删除任何文件。"
+        onConfirm={() => void runMigrate()}
+        onCancel={() => setConfirmMigrate(false)}
+      />
       <McpPanel />
     </section>
   );

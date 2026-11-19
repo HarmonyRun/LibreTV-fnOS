@@ -8,8 +8,9 @@
  */
 
 export type StrmMediaType = 'movie' | 'tv';
-export type StrmActionName = 'sync' | 'cleanup' | 'refresh';
-export type StrmJobAction = 'add' | StrmActionName;
+export type StrmActionName = 'sync' | 'cleanup' | 'refresh' | 'migrate';
+/** 队列任务类型：add 加入媒体库 / remove 从媒体库移除 / 其余为引擎动作 */
+export type StrmJobAction = 'add' | 'remove' | StrmActionName;
 
 export const DEFAULT_SYNC_INTERVAL_HOURS = 6;
 export const DEFAULT_FNV_BASE_URL = 'http://127.0.0.1:5666';
@@ -33,6 +34,8 @@ export const STRM_LIMITS = {
   vodId: 64,
   vodName: 256,
   vodYear: 16,
+  /** 索引 key（`sourceApiBase::vodId`）：移除时用于精确定位条目 */
+  key: 512,
 } as const;
 
 // —— 配置（对外脱敏视图） ——
@@ -95,6 +98,24 @@ export interface StrmRefreshPayload {
   vodId: string;
 }
 
+/**
+ * POST /api/strm/remove 的入参：key 最精确（索引 key），
+ * 没有 key 时用 title（可配 year / type / season）在引擎侧匹配资源目录。
+ * season 只删除该季文件夹，dryRun 只统计不删除。
+ */
+export interface StrmRemovePayload {
+  /** 索引 key（`sourceApiBase::vodId`），与 title 至少提供一个 */
+  key?: string;
+  /** 片名，与 key 至少提供一个；引擎侧按标题匹配资源目录 */
+  title?: string;
+  year?: string;
+  type?: StrmMediaType;
+  /** 1–99 的正整数：只移除该季（对应 Season 01 等目录），保留其它季 */
+  season?: number;
+  /** 只统计将删除的目录/文件，不实际删除 */
+  dryRun?: boolean;
+}
+
 export interface StrmJob<TPayload = Record<string, unknown>> {
   id: string;
   createdAt: string;
@@ -123,6 +144,18 @@ export interface StrmEngineState {
   lastSyncResult?: StrmSyncResult;
   queuePending?: number;
   processingJob?: string;
+  /** 最近一个队列任务的结果概要（引擎写入；字段只做宽松读取） */
+  lastResult?: StrmLastResult | null;
+}
+
+/** state.engine.lastResult：{ at, action, jobId, ok, error?, result? } */
+export interface StrmLastResult {
+  at?: string;
+  action?: string;
+  jobId?: string;
+  ok?: boolean;
+  error?: string;
+  result?: unknown;
 }
 
 export interface StrmFnvState {
@@ -159,6 +192,34 @@ export interface StrmStatusResponse {
 export interface StrmAddResponse {
   ok: true;
   jobId: string;
+}
+
+/** GET /api/strm/entries 的单行：由 strm-index.json 的索引条目投影而来 */
+export interface StrmEntry {
+  key: string;
+  title: string;
+  year: string;
+  type: StrmMediaType;
+  sourceName: string;
+  /** 该条目当前索引到的 .strm 文件数 */
+  strmCount: number;
+  /** 资源根目录名（strmPaths[0] 相对 STRM 根目录的第一层目录），未知时为空 */
+  resourceRoot: string;
+  lastSyncedAt: string;
+  lastError: string;
+  consecutiveFailures: number;
+}
+
+export interface StrmEntriesResponse {
+  ok: true;
+  total: number;
+  entries: StrmEntry[];
+}
+
+export interface StrmRemoveResponse {
+  ok: true;
+  jobId: string;
+  action: 'remove';
 }
 
 export interface StrmActionResponse {
@@ -282,6 +343,58 @@ export function validateRefreshPayload(input: unknown): ValidationResult<StrmRef
   if (!vodId) return { ok: false, error: 'vodId 不能为空' };
   if (vodId.length > STRM_LIMITS.vodId) return { ok: false, error: 'vodId 过长（最多 64 字符）' };
   return { ok: true, value: { sourceApiBase, vodId } };
+}
+
+/**
+ * 校验 /api/strm/remove 的入参：
+ * - key / title 至少提供一个（key 最精确，title 走引擎侧标题匹配）；
+ * - year / type / season 为可选精确条件，season 为 1–99 正整数；
+ * - dryRun 仅为引擎侧的试运行开关（当前 UI 不使用）。
+ */
+export function validateRemovePayload(input: unknown): ValidationResult<StrmRemovePayload> {
+  if (!isPlainRecord(input)) return { ok: false, error: '请求格式错误' };
+
+  const key = readScalar(input.key);
+  if (key.length > STRM_LIMITS.key) {
+    return { ok: false, error: `key 过长（最多 ${STRM_LIMITS.key} 字符）` };
+  }
+  const titleField = stringField(input, 'title', STRM_LIMITS.vodName, 'title');
+  if (!titleField.ok) return titleField;
+  const title = titleField.value;
+  if (!key && !title) return { ok: false, error: 'key 与 title 至少需要提供一个' };
+
+  const yearField = stringField(input, 'year', STRM_LIMITS.vodYear, 'year');
+  if (!yearField.ok) return yearField;
+
+  const payload: StrmRemovePayload = { key, title, year: yearField.value };
+
+  if (input.type !== undefined && input.type !== null) {
+    const typeRaw = typeof input.type === 'string' ? input.type.trim() : '';
+    if (typeRaw !== 'movie' && typeRaw !== 'tv') {
+      return { ok: false, error: 'type 只能是 movie 或 tv' };
+    }
+    payload.type = typeRaw;
+  }
+
+  if (input.season !== undefined && input.season !== null && input.season !== '') {
+    const season =
+      typeof input.season === 'number'
+        ? input.season
+        : typeof input.season === 'string' && input.season.trim()
+          ? Number(input.season.trim())
+          : NaN;
+    if (!Number.isInteger(season) || season < 1 || season > 99) {
+      return { ok: false, error: 'season 必须是 1–99 之间的正整数' };
+    }
+    payload.season = season;
+  }
+
+  if (input.dryRun !== undefined && input.dryRun !== null) {
+    if (typeof input.dryRun !== 'boolean') return { ok: false, error: 'dryRun 必须是布尔值' };
+    payload.dryRun = input.dryRun;
+  }
+
+  return { ok: true, value: payload };
 }
 
 // —— 配置读取 / 脱敏 / 写入校验 ——
@@ -548,4 +661,61 @@ export function formatSyncResult(result: unknown): string {
     return typeof v === 'number' && Number.isFinite(v) ? v : 0;
   };
   return `检查 ${num('checked')} · 更新 ${num('updated')} · 删除 ${num('deleted')} · 孤儿 ${num('orphansDeleted')} · 错误 ${num('errors')}`;
+}
+
+function readCount(raw: Record<string, unknown>, key: string): number | null {
+  const value = raw[key];
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : null;
+}
+
+/** 数组长度，用于兼容部分实现返回目录/条目数组而不是计数 */
+function readArrayCount(raw: Record<string, unknown>, key: string): number | null {
+  const value = raw[key];
+  return Array.isArray(value) ? value.length : null;
+}
+
+/**
+ * 移除任务结果的可读摘要。
+ * 引擎 state.engine.lastResult.result 的契约为：
+ * { ok, mode: 'resource'|'season', dirsRemoved, deletedFiles, entriesRemoved, prunedEntries, failed }
+ * （state.json 只放计数，不放目录路径）；同时兼容旧实现返回数组的写法。
+ * 空对象或无法识别时返回空字符串，由调用方回退到通用文案。
+ */
+export function formatRemoveResult(result: unknown): string {
+  const r = asRecord(result);
+  if (Object.keys(r).length === 0) return '';
+
+  const dirs = readCount(r, 'dirsRemoved') ?? readArrayCount(r, 'deletedDirs') ?? readArrayCount(r, 'dirs') ?? 0;
+  const files = readCount(r, 'deletedFiles') ?? readCount(r, 'totalFiles') ?? readCount(r, 'files') ?? 0;
+  const entries = readCount(r, 'entriesRemoved') ?? readArrayCount(r, 'removedEntries') ?? 0;
+  const pruned = readCount(r, 'prunedEntries') ?? 0;
+  const failed = readCount(r, 'failed') ?? readArrayCount(r, 'failed') ?? 0;
+
+  const parts: string[] = [];
+  if (r.dryRun === true) parts.push('试运行');
+  parts.push(`已移除 ${dirs} 个目录（${files} 个文件），索引移除 ${entries} 条`);
+  if (pruned > 0) parts.push(`${pruned} 条索引仅移除该季`);
+  if (failed > 0) parts.push(`${failed} 个目录删除失败`);
+  return parts.join(' · ');
+}
+
+/**
+ * 换源迁移任务结果的可读摘要。
+ * 引擎 state.engine.lastResult.result 的契约为：
+ * { ok, dryRun, checked, migrated, skipped, failed, entries: [{ title, from, to, files }] }
+ * （entries 明细不入摘要，避免 toast 过长）；字段缺失按 0 处理。
+ * 空对象或无法识别时返回空字符串，由调用方回退到通用文案。
+ */
+export function formatMigrateResult(result: unknown): string {
+  const r = asRecord(result);
+  if (Object.keys(r).length === 0) return '';
+
+  const migrated = readCount(r, 'migrated') ?? 0;
+  const skipped = readCount(r, 'skipped') ?? 0;
+  const failed = readCount(r, 'failed') ?? 0;
+
+  const parts: string[] = [];
+  if (r.dryRun === true) parts.push('试运行');
+  parts.push(`迁移 ${migrated} 条（跳过 ${skipped}，失败 ${failed}）`);
+  return parts.join(' · ');
 }

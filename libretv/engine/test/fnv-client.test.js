@@ -425,3 +425,90 @@ test('extractToken / extractLibraryList：兼容真实响应常见形态', () =>
   assert.equal(fnv.extractLibraryName(list[0]), '电影');
   assert.deepEqual(fnv.extractLibraryPaths(list[0]), ['/strm']);
 });
+
+// 实测：影视 0.9.8+ 的 mediadb/list 不再返回 dir_list，但旧端点 mdb/list 仍返回；
+// 引擎需要回退补齐路径，否则 matchLibraries 会误判 unknown-path-fields 而无法定向扫描。
+test('listLibraries：主端点无 dir_list 时用旧端点补齐路径（不改变扫描端点）', async () => {
+  const paths = [];
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    paths.push(parsed.pathname);
+    if (parsed.pathname === LOGIN) return jsonResponse({ code: 0, data: { token: 'tok' } });
+    if (parsed.pathname === MEDIADB_LIST) {
+      return jsonResponse({
+        code: 0,
+        data: {
+          list: [
+            { guid: 'g-tv', title: 'LibreTV', category: 'Mix', posters: [], refresh_disabled: false },
+            { guid: 'g-movie', title: '电影', category: 'Movie' },
+          ],
+        },
+      });
+    }
+    if (parsed.pathname === LIST) {
+      return jsonResponse({
+        code: 0,
+        data: {
+          list: [
+            { guid: 'g-tv', name: 'LibreTV', dir_list: ['/vol2/1000/liberTV/strmdata/'] },
+            { guid: 'g-movie', name: '电影', dir_list: ['/vol2/1000/电影/'] },
+          ],
+        },
+      });
+    }
+    throw new Error('unexpected ' + parsed.pathname);
+  };
+  const client = new fnv.FnvClient(baseOptions({ fetchImpl }));
+  const list = await client.listLibraries();
+  assert.equal(list.ok, true);
+  // 扫描仍以 mediadb 为主端点
+  assert.equal(list.endpoint, 'mediadb');
+  assert.equal(list.pathEndpoint, 'mdb');
+  assert.equal(list.libraries.length, 2);
+  assert.deepEqual(list.libraries[0].paths, ['/vol2/1000/liberTV/strmdata/']);
+  assert.deepEqual(list.libraries[1].paths, ['/vol2/1000/电影/']);
+  assert.deepEqual(paths, [LOGIN, MEDIADB_LIST, LIST]);
+
+  // 路径补齐后能按 STRM 根目录命中 LibreTV 库
+  const match = fnv.matchLibraries(list.libraries, { strmRoot: '/vol2/1000/liberTV/strmdata' });
+  assert.equal(match.reason, 'path');
+  assert.deepEqual(match.matched.map((item) => item.guid), ['g-tv']);
+});
+
+test('listLibraries：两个端点都没有 dir_list 时保持 unknown-path-fields 判定', async () => {
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === LOGIN) return jsonResponse({ code: 0, data: { token: 'tok' } });
+    if (isListPath(parsed.pathname)) {
+      return jsonResponse({ code: 0, data: { list: [{ guid: 'g1', title: '库一' }, { guid: 'g2', title: '库二' }] } });
+    }
+    throw new Error('unexpected ' + parsed.pathname);
+  };
+  const client = new fnv.FnvClient(baseOptions({ fetchImpl }));
+  const list = await client.listLibraries();
+  assert.equal(list.ok, true);
+  assert.equal(list.pathEndpoint, '');
+  assert.equal(list.libraries.every((item) => item.paths.length === 0), true);
+  const match = fnv.matchLibraries(list.libraries, { strmRoot: '/vol2/1000/liberTV/strmdata' });
+  assert.equal(match.matched.length, 0);
+  assert.equal(match.reason, 'unknown-path-fields');
+});
+
+test('mergeLibraryPaths：按 guid 只补空路径/空名称', () => {
+  const targets = [
+    { guid: 'g1', name: 'LibreTV', paths: [] },
+    { guid: 'g2', name: '', paths: ['/keep'] },
+    { guid: 'g3', name: '无对端', paths: [] },
+  ];
+  const donors = [
+    { guid: 'g1', name: 'LibreTV-旧', paths: ['/vol2/1000/liberTV/strmdata'] },
+    { guid: 'g2', name: '电影', paths: ['/vol2/1000/电影'] },
+  ];
+  const merged = fnv.mergeLibraryPaths(targets, donors);
+  assert.equal(merged, 1);
+  assert.deepEqual(targets[0].paths, ['/vol2/1000/liberTV/strmdata']);
+  assert.equal(targets[0].name, 'LibreTV');
+  assert.deepEqual(targets[1].paths, ['/keep']);
+  assert.equal(targets[1].name, '电影');
+  assert.deepEqual(targets[2].paths, []);
+});

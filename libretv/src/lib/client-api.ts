@@ -1,7 +1,7 @@
 'use client';
 
 import type { SearchResponse, SearchStreamEvent, SourceSearchOutcome, VideoDetail, DoubanResponse, BangumiCalendarResponse, AuthStatusResponse, SourceConfig, SearchResultItem, LivePlaylistResponse, LiveEpgResponse, SourceListPayload, QualityProbeItem, QualityProbeResult } from './types';
-import type { StrmActionName, StrmActionResponse, StrmAddPayload, StrmAddResponse, StrmConfigPatch, StrmConfigPublic, StrmStatusResponse } from './strm';
+import type { StrmActionName, StrmActionResponse, StrmAddPayload, StrmAddResponse, StrmConfigPatch, StrmConfigPublic, StrmEntriesResponse, StrmRemovePayload, StrmRemoveResponse, StrmStatusResponse } from './strm';
 
 /**
  * 客户端 API 封装。401 时触发全局事件打开登录框，
@@ -323,6 +323,28 @@ export const strmApi = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, ...opts }),
+    }),
+
+  /**
+   * 换源迁移：把仍指向已失效采集源的条目，按当前预置采集源重新搜索同名剧集并原地重写 STRM
+   * （入队后立即返回 jobId，实际迁移由引擎异步完成；dryRun 仅用于试运行统计）。
+   */
+  migrate: (opts?: { dryRun?: boolean }) =>
+    request<StrmActionResponse>('/api/strm/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'migrate', ...opts }),
+    }),
+
+  /** 已入库条目列表（来自 strm-index.json，索引缺失时为空列表） */
+  entries: () => request<StrmEntriesResponse>('/api/strm/entries'),
+
+  /** 移除一个入库条目：入队后立即返回 jobId，目录删除与索引清理由引擎异步完成 */
+  remove: (payload: StrmRemovePayload) =>
+    request<StrmRemoveResponse>('/api/strm/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     }),
 };
 

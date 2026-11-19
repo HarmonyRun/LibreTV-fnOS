@@ -273,6 +273,30 @@ function extractLibraryPaths(item) {
   return [...new Set(out)];
 }
 
+/**
+ * 用另一个端点的媒体库列表按 guid 补齐目录路径（必要时补名称）。
+ * 只填空白字段，不覆盖主端点已有数据；返回被补齐路径的库数量。
+ */
+function mergeLibraryPaths(targets, donors) {
+  if (!Array.isArray(targets) || !Array.isArray(donors)) return 0;
+  const byGuid = new Map();
+  for (const donor of donors) {
+    if (donor && donor.guid) byGuid.set(donor.guid, donor);
+  }
+  let merged = 0;
+  for (const target of targets) {
+    if (!target) continue;
+    const donor = target.guid ? byGuid.get(target.guid) : null;
+    if (!donor) continue;
+    if ((!target.paths || target.paths.length === 0) && Array.isArray(donor.paths) && donor.paths.length > 0) {
+      target.paths = donor.paths.slice();
+      merged += 1;
+    }
+    if ((!target.name || !String(target.name).trim()) && donor.name) target.name = donor.name;
+  }
+  return merged;
+}
+
 function normalizePath(p) {
   if (typeof p !== 'string' || !p.trim()) return '';
   let resolved = p.trim();
@@ -561,9 +585,19 @@ class FnvClient {
     return { ...lastResult, attempts };
   }
 
-  /** 媒体库列表（含解析出的目录路径），供自动匹配使用；mediadb/list 失败时回退 mdb/list */
+  /**
+   * 媒体库列表（含解析出的目录路径），供自动匹配使用。
+   *
+   * 端点策略：mediadb/list 失败时回退 mdb/list（旧端点）。
+   * 另有实测差异：影视 0.9.8+ 的 `/v/api/v1/mediadb/list` 只返回展示字段
+   * （guid/title/poster/category…），**不再返回 dir_list**；旧端点 `/v/api/v1/mdb/list`
+   * 仍返回 `name` + `dir_list`。因此当主端点成功但所有库都没有路径时，继续请求其余
+   * 端点并按 guid 合并目录（只补路径，不改变扫描用的 activeEndpoint），避免误判为
+   * unknown-path-fields 而无法定向扫描。
+   */
   async listLibraries() {
     const attempts = [];
+    let primary = null;
     for (const [name, base] of this._orderedEndpoints('list')) {
       const res = await this._request('GET', base, {});
       attempts.push({
@@ -573,24 +607,49 @@ class FnvClient {
         code: res.code,
         error: res.error || '',
       });
-      if (res.ok) {
-        const rawList = extractLibraryList(res.raw);
-        if (rawList === null) {
-          attempts[attempts.length - 1].error = '无法解析媒体库列表（字段名未知）';
-          continue;
-        }
+      if (!res.ok) continue;
+      const rawList = extractLibraryList(res.raw);
+      if (rawList === null) {
+        attempts[attempts.length - 1].error = '无法解析媒体库列表（字段名未知）';
+        continue;
+      }
+      const libraries = rawList.map((item) => ({
+        guid: extractGuid(item),
+        name: extractLibraryName(item),
+        paths: extractLibraryPaths(item),
+        raw: item,
+      }));
+      if (!primary) {
+        primary = { endpoint: name, raw: res.raw, libraries, pathEndpoint: '' };
         this.activeEndpoint = name;
         this.lastEndpoint = name;
         this.endpointAttempts = attempts;
-        const libraries = rawList.map((item) => ({
-          guid: extractGuid(item),
-          name: extractLibraryName(item),
-          paths: extractLibraryPaths(item),
-          raw: item,
-        }));
-        return { ok: true, libraries, raw: res.raw, endpoint: name, attempts };
+        if (libraries.some((item) => item.paths.length > 0)) {
+          return { ok: true, libraries, raw: res.raw, endpoint: name, pathEndpoint: name, attempts };
+        }
+        // 主端点缺目录字段：继续尝试其它端点补齐路径
+        continue;
+      }
+      const merged = mergeLibraryPaths(primary.libraries, libraries);
+      if (merged > 0) {
+        primary.pathEndpoint = name;
+        break;
       }
     }
+
+    if (primary) {
+      this.endpointAttempts = attempts;
+      this.lastEndpoint = primary.endpoint;
+      return {
+        ok: true,
+        libraries: primary.libraries,
+        raw: primary.raw,
+        endpoint: primary.endpoint,
+        pathEndpoint: primary.pathEndpoint,
+        attempts,
+      };
+    }
+
     this.endpointAttempts = attempts;
     const last = attempts.length > 0 ? attempts[attempts.length - 1] : {};
     this.lastEndpoint = last.endpoint || '';
@@ -673,6 +732,7 @@ module.exports = {
   extractGuid,
   extractLibraryName,
   extractLibraryPaths,
+  mergeLibraryPaths,
   matchLibraries,
   normalizePath,
   pathRelated,
