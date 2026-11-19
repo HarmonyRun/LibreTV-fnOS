@@ -1,7 +1,7 @@
 # LibreTV 飞牛 OS 原生应用（内置 STRM 自动化引擎）
 
 > **项目仓库**：<https://github.com/HarmonyRun/LibreTV-fnOS>  
-> **安装包下载**：<https://github.com/HarmonyRun/LibreTV-fnOS/releases>（Release 附件 `libretv-1.0.13.fpk`）  
+> **安装包下载**：<https://github.com/HarmonyRun/LibreTV-fnOS/releases>（Release 附件 `libretv-1.0.14.fpk`）  
 > 本项目基于开源项目 [LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV)（AGPL-3.0）二次开发，
 > 上游 fork：<https://github.com/HarmonyRun/LibreTV>。
 
@@ -137,7 +137,7 @@ STRM 生成后，引擎会调用飞牛影视 API 对**发生变化的目录**做
 
 | 项目 | 结果 |
 |---|---|
-| `fnpack build` | ✅ 零错误，`dist/libretv-1.0.13.fpk`（51.3M，SHA256 `4f31e6cf…`） |
+| `fnpack build` | ✅ 零错误，`dist/libretv-1.0.14.fpk`（51.3M，SHA256 `3b7a9d2c…`） |
 | 安装到 /vol2、启动、`/api/auth` 200 | ✅ |
 | 引擎单测 / Web 单测 / lint / tsc | ✅ 101 / 467 / 0 / 0 |
 | 电影「加入媒体库」→ STRM 落盘 | ✅《沙丘 (2020)》 |
@@ -150,6 +150,7 @@ STRM 生成后，引擎会调用飞牛影视 API 对**发生变化的目录**做
 | **设置页「移除」（1.0.12）** | ✅ 实机 `POST /api/strm/remove` → `dirsRemoved=1 deletedFiles=2 entriesRemoved=1`，索引 18→17，资源目录消失 |
 | **尊重手动删除（1.0.12）** | ✅ 实机整目录删除后触发同步：`manualRemoved=1 updated=0`，目录未被重建、索引移除 |
 | **换源迁移（1.0.13）** | ✅ 实机：24 条已入库条目中 17 条自动迁到新源（无尽/非凡/猫眼），`migrated=17 skipped=7 failed=0`；STRM 文件名与路径完全不变、影视 media guid 不变（播放进度保留）；迁移后同步只剩 6 条旧源条目报错 |
+| **默认源修复（1.0.14）** | ✅ 实机：升级回调把旧默认源就地替换为可用源（`sources:legacy->current`，自定义源保留）；新装 `install_callback`/`main` 模板均写入新源；`config/index` 保留 |
 | **迁移后播放（1.0.13）** | ✅ 迁移后的 m3u8 直链 200、`application/vnd.apple.mpegurl`；影视定向扫描 `飞牛影视刷新成功 dirs=17` |
 | **302 播放** | ⚠️ 需人工点播确认（程序化探测受媒体服务任务状态限制，见 docs/FINAL-VERIFY.md §5、docs/VERIFY-STRM.md §4） |
 
@@ -460,6 +461,22 @@ MCP 搜索资源、加入影视库、删除 STRM、触发同步与媒体库扫�
 - 相关代码：[engine/cms.js](libretv/engine/cms.js) 的 `searchVods()`、[engine/engine-core.js](libretv/engine/engine-core.js)
   的 `migrateEntry()` / `runSourceMigration()` / `handleMigrate()`；设置页按钮在
   [src/components/strm-panel.tsx](libretv/src/components/strm-panel.tsx)。
+
+## 十七·补、1.0.14 默认源同步修复
+
+1.0.13 及更早版本中，**全新安装**写入的默认采集源来自 `cmd/install_callback`（以及 `cmd/main`/`cmd/upgrade_callback`
+的内置兜底模板），这几处硬编码的仍是旧 4 个源（电影天堂/量子/如意/优质），与 `cmd/main` 的
+`DEFAULT_SOURCES_JSON` 不同步，导致新装机器仍然使用已被墙的旧源、搜索为空。
+
+1.0.14 起：
+
+- `install_callback` / `main` 的默认配置模板统一为当前可用源（最大/无尽/非凡/猫眼）；
+- `upgrade_callback` 增加**默认源迁移**：升级时把 `config.sources` 中 URL 仍为旧默认源的条目
+  **就地替换**为当前可用源（保留 `env_*` key，浏览器端选中的源与健康度继续有效），用户自定义源不动；
+- 修复后：新装即用可用源；从 1.0.13 及更早升级会自动修正已有 `config.json`，无需手动改文件。
+
+> 仍在使用 1.0.13 且搜索为空的机器：安装 1.0.14（应用中心手动安装或应用内 OTA）即可自动修复；
+> 也可临时手动把 `/vol2/@appdata/libretv/config.json` 的 `sources` 改成可用源后重启应用。
 
 ## 十八、许可证与致谢
 

@@ -41,14 +41,33 @@ fill(cfg, "strmRoot", "", "strmRoot");
 fill(cfg, "syncIntervalHours", 6, "syncIntervalHours");
 fill(cfg, "movieLibraryName", "LibreTV 电影", "movieLibraryName");
 fill(cfg, "tvLibraryName", "LibreTV 剧集", "tvLibraryName");
-if (!Array.isArray(cfg.sources)) {
-  cfg.sources = [
-    { key: "env_0", name: "电影天堂资源", url: "https://caiji.dyttzyapi.com/api.php/provide/vod" },
-    { key: "env_1", name: "量子资源", url: "https://cj.lziapi.com/api.php/provide/vod" },
-    { key: "env_2", name: "如意资源", url: "https://cj.rycjapi.com/api.php/provide/vod" },
-    { key: "env_3", name: "优质资源", url: "https://api.yzzy-api.com/inc/apijson.php" }
-  ];
+const DEFAULT_SOURCES = [
+  { key: "env_0", name: "最大资源", url: "https://api.zuidapi.com/api.php/provide/vod" },
+  { key: "env_1", name: "无尽资源", url: "https://api.wujinapi.com/api.php/provide/vod" },
+  { key: "env_2", name: "非凡资源", url: "https://api.ffzyapi.com/api.php/provide/vod" },
+  { key: "env_3", name: "猫眼资源", url: "https://api.maoyanapi.top/api.php/provide/vod" }
+];
+// 1.0.14：全新安装/升级时写入当前可用源；升级时把历史默认源（已被墙）就地替换，自定义源保持不动
+const LEGACY_DEFAULT_SOURCES = {
+  "https://caiji.dyttzyapi.com/api.php/provide/vod": DEFAULT_SOURCES[0],
+  "https://cj.lziapi.com/api.php/provide/vod": DEFAULT_SOURCES[1],
+  "https://cj.rycjapi.com/api.php/provide/vod": DEFAULT_SOURCES[2],
+  "https://api.yzzy-api.com/inc/apijson.php": DEFAULT_SOURCES[3]
+};
+const normalizeSourceUrl = (u) => (typeof u === "string" ? u.trim().replace(/\/+$/, "") : "");
+if (!Array.isArray(cfg.sources) || cfg.sources.length === 0) {
+  cfg.sources = DEFAULT_SOURCES.map((s) => ({ ...s }));
   changed.push("sources");
+} else {
+  let replacedLegacy = 0;
+  cfg.sources = cfg.sources.map((item) => {
+    if (!item || typeof item !== "object") return item;
+    const legacy = LEGACY_DEFAULT_SOURCES[normalizeSourceUrl(item.url)];
+    if (!legacy) return item;
+    replacedLegacy += 1;
+    return { ...item, name: legacy.name, url: legacy.url };
+  });
+  if (replacedLegacy > 0) changed.push("sources:legacy->current");
 }
 if (!cfg.fnv || typeof cfg.fnv !== "object") {
   cfg.fnv = {
